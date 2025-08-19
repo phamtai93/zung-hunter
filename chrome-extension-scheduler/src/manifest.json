@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Link Scheduler Extension",
+  "version": "1.0.0",
+  "description": "Schedule and monitor web link processing with multiple schedule types",
+  "permissions": [
+    "storage",
+    "alarms",
+    "activeTab",
+    "background",
+    "notifications",
+    "tabs",
+    "scripting",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background/background.ts",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "Link Scheduler",
+    "default_icon": {
+      "16": "src/assets/icons/icon16.png",
+      "48": "src/assets/icons/icon48.png",
+      "128": "src/assets/icons/icon128.png"
+    }
+  },
+  "options_page": "src/options/options.html",
+  "icons": {
+    "16": "src/assets/icons/icon16.png",
+    "48": "src/assets/icons/icon48.png",
+    "128": "src/assets/icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/request-tracker"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/assets/*", "src/content/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
