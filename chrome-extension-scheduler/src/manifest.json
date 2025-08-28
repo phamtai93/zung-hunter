@@ -39,17 +39,21 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["src/content/request-tracker"],
+      "js": ["src/content/request-tracker.ts"],
       "run_at": "document_start",
-      "all_frames": true,
-      "match_about_blank": true,
-      "match_origin_as_fallback": true
+      "all_frames": false,
+      "match_about_blank": false,
+      "match_origin_as_fallback": false
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["src/assets/*", "src/content/*"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "src/assets/*",
+        "src/content/*"
+      ],
+      "matches": ["<all_urls>"],
+      "use_dynamic_url": false
     }
   ]
 }

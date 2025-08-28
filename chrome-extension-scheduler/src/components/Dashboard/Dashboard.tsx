@@ -76,7 +76,7 @@ const Dashboard: React.FC = () => {
 
   // Lắng nghe tin nhắn từ background script
   useEffect(() => {
-    const messageListener = (message: any, sender: any, sendResponse: any) => {
+    const messageListener = (message: any, _sender: any, _sendResponse: any) => {
       console.log('🔍 Dashboard received message:', message.type);
       
       try {
@@ -277,7 +277,7 @@ const Dashboard: React.FC = () => {
   const toggleScheduler = () => {
     try {
       const action = isSchedulerRunning ? 'STOP_SCHEDULER' : 'START_SCHEDULER';
-      chrome.runtime.sendMessage({ type: action }, (response) => {
+      chrome.runtime.sendMessage({ type: action }, (_response) => {
         if (chrome.runtime.lastError) {
           console.error('Error toggling scheduler:', chrome.runtime.lastError);
           return;
@@ -364,7 +364,7 @@ const Dashboard: React.FC = () => {
       title: 'API Tracked',
       dataIndex: 'requestCount',
       key: 'requestCount',
-      render: (count: number, record: ActiveTab) => (
+      render: (count: number, _record: ActiveTab) => (
         <div>
           <Badge count={count || 0} />
           {count > 0 && (
