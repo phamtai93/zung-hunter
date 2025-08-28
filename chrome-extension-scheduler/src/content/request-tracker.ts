@@ -1,452 +1,524 @@
-// ===== FIXED: src/content/request-tracker.ts - Proper XHR headers tracking =====
-
-interface TrackedRequest {
-  id: string;
-  url: string;
-  method: string;
-  headers: Record<string, string>;
-  body?: string;
-  timestamp: number;
-  linkId: string;
-  scheduleId: string;
-}
-
-interface TrackedResponse {
-  id: string;
-  requestId: string;
-  status: number;
-  statusText: string;
-  headers: Record<string, string>;
-  body?: string;
-  timestamp: number;
-  responseTime: number;
-}
-
-// Interface for enhanced XMLHttpRequest with tracking
-interface EnhancedXMLHttpRequest extends XMLHttpRequest {
-  _method?: string;
-  _url?: string;
-  _headers?: Record<string, string>;  // Store request headers
-}
+// src/content/request-tracker.ts
+import { TRACKING_STOCK_LINK, ALTERNATIVE_TRACKING_PATTERNS, MODELS_POSITION } from '../utils/default-system-settings';
 
 class RequestTracker {
-  private linkId: string = '';
-  private scheduleId: string = '';
-
+  private originalFetch: typeof fetch;
+  private originalXHROpen: typeof XMLHttpRequest.prototype.open;
+  private originalXHRSend: typeof XMLHttpRequest.prototype.send;
+  private isInitialized: boolean = false;
+  
   constructor() {
-    this.setupRequestInterception();
-    this.listenForInitData();
+    // Prevent multiple initializations
+    if (window.__REQUEST_TRACKER_INITIALIZED__) {
+      return;
+    }
+    
+    this.originalFetch = window.fetch;
+    this.originalXHROpen = XMLHttpRequest.prototype.open;
+    this.originalXHRSend = XMLHttpRequest.prototype.send;
+    
+    this.init();
   }
 
-  private listenForInitData() {
-    window.addEventListener('message', (event) => {
-      if (event.data && event.data.type === 'INIT_TRACKING') {
-        this.linkId = event.data.linkId || '';
-        this.scheduleId = event.data.scheduleId || '';
-        console.log('Request tracking initialized for:', this.linkId);
-      }
-    });
+  private init() {
+    if (this.isInitialized) return;
+    
+    console.log('🚀 Request tracker initializing EARLY for:', location.href);
+    
+    // Mark as initialized globally FIRST
+    window.__REQUEST_TRACKER_INITIALIZED__ = true;
+    this.isInitialized = true;
+    
+    // Override network APIs IMMEDIATELY - this is critical for early capture
+    this.interceptFetch();
+    this.interceptXHR();
+    
+    console.log('✅ Request tracker initialized and READY for API tracking');
+    console.log('📡 Tracking patterns:', [TRACKING_STOCK_LINK, ...ALTERNATIVE_TRACKING_PATTERNS]);
+    
+    // Notify background that content script is ready (non-blocking)
+    setTimeout(() => this.notifyReady(), 0);
   }
 
-  private setupRequestInterception() {
-    // Store original methods
-    const originalXHROpen = XMLHttpRequest.prototype.open;
-    const originalXHRSend = XMLHttpRequest.prototype.send;
-    const originalXHRSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-
-    // Override XMLHttpRequest.open
-    XMLHttpRequest.prototype.open = function(
-      method: string, 
-      url: string | URL, 
-      async?: boolean, 
-      user?: string | null, 
-      password?: string | null
-    ): void {
-      try {
-        const enhancedXHR = this as EnhancedXMLHttpRequest;
-        enhancedXHR._method = method;
-        enhancedXHR._url = typeof url === 'string' ? url : url.toString();
-        enhancedXHR._headers = {}; // Initialize headers storage
-        
-        // Call original with proper arguments
-        if (arguments.length === 2) {
-          return originalXHROpen.call(this, method, url, false);
-        } else if (arguments.length === 3) {
-          return originalXHROpen.call(this, method, url, async!);
-        } else if (arguments.length === 4) {
-          return originalXHROpen.call(this, method, url, async!, user);
-        } else {
-          return originalXHROpen.call(this, method, url, async!, user, password);
+  private notifyReady() {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'CONTENT_SCRIPT_READY',
+        data: { 
+          url: location.href,
+          timestamp: new Date().toISOString(),
+          patterns: [TRACKING_STOCK_LINK, ...ALTERNATIVE_TRACKING_PATTERNS]
         }
-      } catch (error) {
-        console.error('XMLHttpRequest.open failed:', error);
-        throw error;
-      }
-    };
-
-    // FIXED: Override setRequestHeader to capture headers
-    XMLHttpRequest.prototype.setRequestHeader = function(name: string, value: string): void {
-      try {
-        const enhancedXHR = this as EnhancedXMLHttpRequest;
-        
-        // Store header for tracking
-        if (!enhancedXHR._headers) {
-          enhancedXHR._headers = {};
-        }
-        enhancedXHR._headers[name.toLowerCase()] = value;
-        
-        // Call original method
-        return originalXHRSetRequestHeader.call(this, name, value);
-      } catch (error) {
-        console.error('XMLHttpRequest.setRequestHeader failed:', error);
-        throw error;
-      }
-    };
-
-    // Override XMLHttpRequest.send
-    XMLHttpRequest.prototype.send = function(body?: BodyInit | Document | null): void {
-      const tracker = RequestTrackerInstance.getInstance();
-      tracker.trackXHRRequest(this as EnhancedXMLHttpRequest, body);
-      return originalXHRSend.call(this, body as Document);
-    };
-
-    // Override fetch (unchanged, but added for completeness)
-    const originalFetch = window.fetch;
-    window.fetch = async function(
-      input: RequestInfo | URL, 
-      init?: RequestInit
-    ): Promise<Response> {
-      const tracker = RequestTrackerInstance.getInstance();
-      const requestId = tracker.generateRequestId();
+      }).then(response => {
+        console.log('✅ Notified background script of readiness:', response);
+      }).catch((error) => {
+        console.warn('⚠️ Could not notify background script:', error);
+      });
       
-      let url: string;
-      let method = 'GET';
-      let headers: Record<string, string> = {};
-      let body: string | undefined;
+      // Test URL pattern matching for current page
+      console.log('🧪 Testing URL patterns for current page:');
+      console.log(`Current URL: ${location.href}`);
+      console.log(`Will track: ${this.shouldTrackUrl(location.href)}`);
+      
+      // Test some example URLs
+      const testUrls = [
+        'https://shopee.vn/api/v4/pdp/get_pc?item_id=123',
+        'https://example.com/api/v4/pdp/get_pc'
+      ];
+      
+      testUrls.forEach(url => {
+        console.log(`Test URL ${url}: ${this.shouldTrackUrl(url) ? '✅ MATCH' : '❌ NO MATCH'}`);
+      });
+      
+    } catch (error) {
+      console.warn('Could not notify background of content script ready:', error);
+    }
+  }
 
-      // Parse input parameter
+  private interceptFetch() {
+    const self = this;
+    
+    console.log('🔧 Overriding fetch API...');
+    
+    window.fetch = async function(input: RequestInfo | URL, init?: RequestInit) {
+      let url: string;
+      
       if (typeof input === 'string') {
         url = input;
       } else if (input instanceof URL) {
         url = input.toString();
       } else if (input instanceof Request) {
         url = input.url;
-        method = input.method || 'GET';
-        if (input.headers) {
-          headers = tracker.headersToObject(input.headers);
-        }
-        if (input.body) {
-          try {
-            body = await input.clone().text();
-          } catch (e) {
-            body = undefined;
-          }
-        }
       } else {
         url = String(input);
       }
-
-      if (init) {
-        method = init.method || method;
-        if (init.headers) {
-          headers = { ...headers, ...tracker.headersToObject(init.headers) };
-        }
-        body = init.body ? String(init.body) : body;
-      }
-
-      // Track request if it matches TRACKING_STOCK_LINK
-      if (tracker.shouldTrackUrl(url)) {
-        const trackedRequest: TrackedRequest = {
-          id: requestId,
-          url,
-          method,
-          headers,
-          body,
-          timestamp: Date.now(),
-          linkId: tracker.linkId,
-          scheduleId: tracker.scheduleId
-        };
-
-        tracker.saveTrackedRequest(trackedRequest);
-      }
-
-      // Make the actual request
-      const startTime = Date.now();
-      try {
-        const response = await originalFetch.call(window, input, init);
+      
+      console.log('📡 Fetch intercepted:', url.substring(0, 100));
+      
+      // Check if this URL should be tracked
+      if (self.shouldTrackUrl(url)) {
+        console.log('🎯 FETCH URL MATCHES - Starting tracking:', url);
         
-        // Track response if request was tracked
-        if (tracker.shouldTrackUrl(url)) {
-          const responseTime = Date.now() - startTime;
-          let responseBody: string | undefined;
+        try {
+          // Capture complete request data
+          const requestHeaders = self.headersToObject(init?.headers);
+          const requestBody = self.getRequestBody(init?.body);
+          const method = init?.method || 'GET';
+          
+          const requestData = {
+            url,
+            method,
+            headers: requestHeaders,
+            body: requestBody,
+            timestamp: new Date().toISOString()
+          };
+
+          console.log('📤 Request data captured:', {
+            url: url.substring(0, 100),
+            method,
+            headersCount: Object.keys(requestHeaders).length,
+            hasBody: !!requestBody
+          });
+
+          // Execute original fetch
+          const response = await self.originalFetch.call(this, input, init);
+          
+          // Clone response to read body without consuming it
+          const responseClone = response.clone();
+          let responseBody: any;
+          let modelsJson: any = null;
           
           try {
-            responseBody = await response.clone().text();
+            const responseText = await responseClone.text();
+            console.log('📥 Response text length:', responseText.length);
+            
+            // Try to parse as JSON
+            try {
+              responseBody = JSON.parse(responseText);
+              console.log('✅ Response parsed as JSON successfully');
+              
+              // Extract models data if JSON parsing successful
+              modelsJson = self.extractModelsFromResponse(responseBody);
+              console.log('🎯 Models extraction result:', modelsJson ? 'SUCCESS' : 'NO_MODELS');
+              
+            } catch (e) {
+              responseBody = responseText; // Keep as text if not JSON
+              console.log('⚠️ Response is not JSON, keeping as text');
+            }
           } catch (e) {
-            responseBody = `[Unable to read response: ${e}]`;
+            responseBody = 'Failed to read response body';
+            console.error('❌ Failed to read response body:', e);
           }
+
+          // Capture complete response data
+          const responseHeaders = self.headersToObject(response.headers);
           
-          const trackedResponse: TrackedResponse = {
-            id: tracker.generateRequestId(),
-            requestId,
+          console.log('📥 Response data captured:', {
             status: response.status,
-            statusText: response.statusText,
-            headers: tracker.headersToObject(response.headers),
-            body: responseBody,
-            timestamp: Date.now(),
-            responseTime
-          };
+            headersCount: Object.keys(responseHeaders).length,
+            bodyType: typeof responseBody,
+            hasModels: !!modelsJson
+          });
 
-          tracker.saveTrackedResponse(trackedResponse);
+          // Send complete tracked data to background script
+          self.sendTrackedData({
+            url,
+            method,
+            requestHeaders,
+            requestBody,
+            responseHeaders,
+            responseBody,
+            responseStatus: response.status,
+            responseStatusText: response.statusText,
+            modelsJson, // Include extracted models
+            timestamp: new Date().toISOString(),
+            captureSource: 'fetch'
+          });
+
+          return response;
+          
+        } catch (error) {
+          console.error('❌ Error tracking fetch request:', error);
+          // Still execute original fetch even if tracking fails
+          return self.originalFetch.call(this, input, init);
         }
-
-        return response;
-      } catch (error) {
-        // Track error response
-        if (tracker.shouldTrackUrl(url)) {
-          const trackedResponse: TrackedResponse = {
-            id: tracker.generateRequestId(),
-            requestId,
-            status: 0,
-            statusText: error instanceof Error ? error.message : 'Network Error',
-            headers: {},
-            timestamp: Date.now(),
-            responseTime: Date.now() - startTime
-          };
-
-          tracker.saveTrackedResponse(trackedResponse);
-        }
-        throw error;
+      } else {
+        // Don't log non-tracked URLs to avoid spam
+        // console.log('⏭️ URL not tracked, skipping');
       }
+      
+      // Execute original fetch for non-tracked URLs
+      return self.originalFetch.call(this, input, init);
+    };
+    
+    console.log('✅ Fetch API override complete');
+  }
+
+  private interceptXHR() {
+    const self = this;
+    
+    // Override XMLHttpRequest.open
+    XMLHttpRequest.prototype.open = function(
+      method: string,
+      url: string | URL,
+      async?: boolean,
+      username?: string | null,
+      password?: string | null
+    ) {
+      const urlString = typeof url === 'string' ? url : url.toString();
+      
+      // Store request info for later use
+      (this as any)._trackedUrl = urlString;
+      (this as any)._trackedMethod = method;
+      (this as any)._trackedRequestHeaders = {};
+      
+      // If this should be tracked, set up event listeners
+      if (self.shouldTrackUrl(urlString)) {
+        console.log('🎯 Tracking XHR request:', urlString);
+        
+        // Override setRequestHeader to capture all headers
+        const originalSetHeader = this.setRequestHeader.bind(this);
+        this.setRequestHeader = function(header: string, value: string) {
+          (this as any)._trackedRequestHeaders[header] = value;
+          return originalSetHeader(header, value);
+        };
+        
+        this.addEventListener('readystatechange', function() {
+          if (this.readyState === 4) { // DONE
+            try {
+              const responseHeaders = self.parseResponseHeaders(this.getAllResponseHeaders());
+              
+              let responseBody: any = this.responseText;
+              let modelsJson: any = null;
+              
+              // Try to parse response as JSON and extract models
+              try {
+                const parsedResponse = JSON.parse(this.responseText);
+                responseBody = parsedResponse;
+                modelsJson = self.extractModelsFromResponse(parsedResponse);
+              } catch (e) {
+                // Keep as text if not JSON
+                responseBody = this.responseText;
+              }
+              
+              console.log('📥 XHR Response data captured:', {
+                status: this.status,
+                headers: Object.keys(responseHeaders),
+                bodySize: typeof responseBody === 'string' ? responseBody.length : 'object',
+                modelsFound: modelsJson ? 'Yes' : 'No'
+              });
+              
+              // Send complete tracked data
+              self.sendTrackedData({
+                url: urlString,
+                method: method,
+                requestHeaders: (this as any)._trackedRequestHeaders || {},
+                requestBody: (this as any)._trackedRequestBody,
+                responseHeaders,
+                responseBody,
+                responseStatus: this.status,
+                responseStatusText: this.statusText,
+                modelsJson, // Include extracted models
+                timestamp: new Date().toISOString(),
+                captureSource: 'xhr'
+              });
+            } catch (error) {
+              console.error('Error tracking XHR response:', error);
+            }
+          }
+        });
+      }
+      
+      // Call original open
+      return self.originalXHROpen.call(this, method, url, async ?? true, username, password);
+    };
+
+    // Override XMLHttpRequest.send
+    XMLHttpRequest.prototype.send = function(body?: Document | XMLHttpRequestBodyInit | null) {
+      // Store request body for tracking
+      if (self.shouldTrackUrl((this as any)._trackedUrl)) {
+        (this as any)._trackedRequestBody = self.getRequestBody(body);
+        
+        console.log('📤 XHR Request data captured:', {
+          url: (this as any)._trackedUrl,
+          method: (this as any)._trackedMethod,
+          headers: Object.keys((this as any)._trackedRequestHeaders || {}),
+          hasBody: !!body
+        });
+      }
+      
+      // Call original send
+      return self.originalXHRSend.call(this, body);
     };
   }
 
-  private generateRequestId(): string {
-    return `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
-
   private shouldTrackUrl(url: string): boolean {
+    console.log('🔍 Content script checking URL:', url.substring(0, 150));
+    
     try {
-      const TRACKING_STOCK_LINK = (window as any).EXTENSION_SETTINGS?.TRACKING_STOCK_LINK || '';
-      
-      if (!TRACKING_STOCK_LINK) {
-        return false;
+      // Primary check: exact URL match
+      if (url.includes(TRACKING_STOCK_LINK)) {
+        console.log('✅ URL matches PRIMARY pattern:', TRACKING_STOCK_LINK);
+        return true;
       }
-
-      return url.includes(TRACKING_STOCK_LINK) || url === TRACKING_STOCK_LINK;
+      
+      // Secondary check: alternative patterns
+      for (const pattern of ALTERNATIVE_TRACKING_PATTERNS) {
+        if (url.includes(pattern)) {
+          console.log('✅ URL matches ALTERNATIVE pattern:', pattern);
+          return true;
+        }
+      }
+      
+      console.log('❌ URL does NOT match any tracking patterns');
+      console.log('📋 Available patterns:', [TRACKING_STOCK_LINK, ...ALTERNATIVE_TRACKING_PATTERNS]);
+      
+      return false;
     } catch (error) {
-      console.error('Error checking URL tracking:', error);
+      console.error('❌ Error checking URL for tracking:', error);
       return false;
     }
   }
 
-  private headersToObject(headers: HeadersInit): Record<string, string> {
-    const result: Record<string, string> = {};
-
-    try {
-      if (headers instanceof Headers) {
-        headers.forEach((value, key) => {
-          result[key] = value;
-        });
-      } else if (Array.isArray(headers)) {
-        headers.forEach(([key, value]) => {
-          if (typeof key === 'string' && typeof value === 'string') {
-            result[key] = value;
-          }
-        });
-      } else if (headers && typeof headers === 'object') {
-        Object.entries(headers).forEach(([key, value]) => {
-          if (typeof key === 'string' && typeof value === 'string') {
-            result[key] = value;
-          }
-        });
-      }
-    } catch (error) {
-      console.error('Error converting headers:', error);
-    }
-
-    return result;
-  }
-
-  private saveTrackedRequest(request: TrackedRequest): void {
-    try {
-      window.postMessage({
-        type: 'SAVE_TRACKED_REQUEST',
-        data: request
-      }, '*');
-    } catch (error) {
-      console.error('Failed to save tracked request:', error);
-    }
-  }
-
-  private saveTrackedResponse(response: TrackedResponse): void {
-    try {
-      window.postMessage({
-        type: 'SAVE_TRACKED_RESPONSE',
-        data: response
-      }, '*');
-    } catch (error) {
-      console.error('Failed to save tracked response:', error);
-    }
-  }
-
-  private trackXHRRequest(xhr: EnhancedXMLHttpRequest, body?: BodyInit | Document | null): void {
-    const url = xhr._url;
-    const method = xhr._method;
-
-    if (!url || !this.shouldTrackUrl(url)) return;
-
-    const requestId = this.generateRequestId();
-    const startTime = Date.now();
-
-    // FIXED: Now we can get the actual request headers!
-    const trackedRequest: TrackedRequest = {
-      id: requestId,
-      url,
-      method: method || 'GET',
-      headers: xhr._headers || {}, // Use captured headers
-      body: body ? String(body) : undefined,
-      timestamp: Date.now(),
-      linkId: this.linkId,
-      scheduleId: this.scheduleId
-    };
-
-    this.saveTrackedRequest(trackedRequest);
-
-    // Track response
-    const originalOnReadyStateChange = xhr.onreadystatechange;
+  private headersToObject(headers: HeadersInit | Headers | undefined): Record<string, string> {
+    if (!headers) return {};
     
-    xhr.onreadystatechange = (event: Event) => {
-      if (xhr.readyState === 4) {
-        const responseTime = Date.now() - startTime;
-        const trackedResponse: TrackedResponse = {
-          id: this.generateRequestId(),
-          requestId,
-          status: xhr.status,
-          statusText: xhr.statusText,
-          headers: this.getXHRResponseHeaders(xhr),
-          body: xhr.responseText,
-          timestamp: Date.now(),
-          responseTime
-        };
-
-        this.saveTrackedResponse(trackedResponse);
-      }
-
-      if (originalOnReadyStateChange) {
-        try {
-          originalOnReadyStateChange.call(xhr, event);
-        } catch (error) {
-          console.error('Error in original onreadystatechange:', error);
-        }
-      }
-    };
+    if (headers instanceof Headers) {
+      const obj: Record<string, string> = {};
+      headers.forEach((value, key) => {
+        obj[key] = value;
+      });
+      return obj;
+    }
+    
+    if (Array.isArray(headers)) {
+      const obj: Record<string, string> = {};
+      headers.forEach(([key, value]) => {
+        obj[key] = value;
+      });
+      return obj;
+    }
+    
+    return headers as Record<string, string>;
   }
 
-  private getXHRResponseHeaders(xhr: XMLHttpRequest): Record<string, string> {
+  private parseResponseHeaders(headerStr: string): Record<string, string> {
     const headers: Record<string, string> = {};
     
-    try {
-      const headerString = xhr.getAllResponseHeaders();
-      if (headerString) {
-        headerString.split('\r\n').forEach(line => {
-          const parts = line.split(': ');
-          if (parts.length === 2) {
-            headers[parts[0].toLowerCase()] = parts[1];
-          }
-        });
+    if (!headerStr) return headers;
+    
+    const lines = headerStr.trim().split(/[\r\n]+/);
+    lines.forEach(line => {
+      const parts = line.split(': ');
+      const header = parts.shift();
+      const value = parts.join(': ');
+      if (header) {
+        headers[header.toLowerCase()] = value;
       }
-    } catch (error) {
-      console.error('Error getting response headers:', error);
-    }
+    });
     
     return headers;
   }
-}
 
-// Singleton pattern for tracker
-class RequestTrackerInstance extends RequestTracker {
-  private static instance: RequestTrackerInstance | null = null;
-  
-  static getInstance(): RequestTrackerInstance {
-    if (!RequestTrackerInstance.instance) {
-      RequestTrackerInstance.instance = new RequestTrackerInstance();
-    }
-    return RequestTrackerInstance.instance;
-  }
-
-  static updateSettings(settings: { TRACKING_STOCK_LINK: string }) {
-    (window as any).EXTENSION_SETTINGS = settings;
-  }
-}
-
-// Initialize request tracking when script loads
-if (typeof window !== 'undefined') {
-  try {
-    RequestTrackerInstance.getInstance();
-    console.log('Request tracker initialized successfully');
-  } catch (error) {
-    console.error('Failed to initialize request tracker:', error);
-  }
-}
-
-// Export for external access
-if (typeof window !== 'undefined') {
-  (window as any).RequestTracker = RequestTrackerInstance;
-}
-
-// ===== TESTING: XHR Headers Capture =====
-// Add this function to test header capture
-function testXHRHeaderCapture() {
-  console.log('🧪 Testing XHR header capture...');
-  
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', 'https://httpbin.org/post');
-  
-  // Set some headers to test capture
-  xhr.setRequestHeader('Content-Type', 'application/json');
-  xhr.setRequestHeader('Authorization', 'Bearer test-token');
-  xhr.setRequestHeader('X-Custom-Header', 'test-value');
-  
-  xhr.onreadystatechange = function() {
-    if (xhr.readyState === 4) {
-      console.log('✅ XHR request completed');
+  /**
+   * Extract models data from API response using MODELS_POSITION path
+   */
+  private extractModelsFromResponse(responseBody: any): any {
+    if (!responseBody) return null;
+    
+    try {
+      // Parse MODELS_POSITION path (e.g., "data.item.models")
+      const pathSegments = MODELS_POSITION.split('.');
+      let current = responseBody;
       
-      // Check if headers were captured
-      const enhancedXHR = xhr as any;
-      console.log('📋 Captured headers:', enhancedXHR._headers);
+      for (const segment of pathSegments) {
+        if (current && typeof current === 'object' && segment in current) {
+          current = current[segment];
+        } else {
+          console.warn(`Models path segment '${segment}' not found in response`);
+          return null;
+        }
+      }
+      
+      console.log('📊 Models data extracted:', current);
+      return current;
+    } catch (error) {
+      console.error('Error extracting models from response:', error);
+      return null;
     }
-  };
-  
-  xhr.send(JSON.stringify({ test: 'data' }));
+  }
+
+  private getRequestBody(body: any): any {
+    if (!body) return null;
+    
+    if (typeof body === 'string') {
+      try {
+        return JSON.parse(body);
+      } catch (e) {
+        return body;
+      }
+    }
+    
+    if (body instanceof FormData) {
+      const formObj: Record<string, any> = {};
+      body.forEach((value, key) => {
+        formObj[key] = value;
+      });
+      return formObj;
+    }
+    
+    return body;
+  }
+
+  private async sendTrackedData(data: any) {
+    try {
+      const tabId = await this.getCurrentTabId();
+      
+      // Add tab ID and enhanced metadata
+      const trackedData = {
+        ...data,
+        tabId,
+        url: data.url,
+        source: 'contentScript',
+        pageUrl: location.href,
+        userAgent: navigator.userAgent
+      };
+
+      console.log('📤 Preparing to send COMPLETE tracked data:', {
+        tabId,
+        url: trackedData.url?.substring(0, 100),
+        method: trackedData.method,
+        hasRequestHeaders: Object.keys(trackedData.requestHeaders || {}).length > 0,
+        hasRequestBody: !!trackedData.requestBody,
+        hasResponseHeaders: Object.keys(trackedData.responseHeaders || {}).length > 0,
+        hasResponseBody: !!trackedData.responseBody,
+        hasModels: !!trackedData.modelsJson,
+        responseStatus: trackedData.responseStatus
+      });
+
+      console.log('📤 Full tracked data structure:', {
+        keys: Object.keys(trackedData),
+        dataSize: JSON.stringify(trackedData).length
+      });
+
+      // Send to background script
+      chrome.runtime.sendMessage({
+        type: 'API_REQUEST_TRACKED',
+        data: trackedData
+      }).then(response => {
+        console.log('✅ Message sent to background, response:', response);
+      }).catch(error => {
+        console.error('❌ Error sending tracked data to background:', error);
+      });
+
+    } catch (error) {
+      console.error('❌ Error preparing tracked data:', error);
+    }
+  }
+
+  private async getCurrentTabId(): Promise<number> {
+    try {
+      console.log('🔍 Getting current tab ID...');
+      return new Promise((resolve) => {
+        chrome.runtime.sendMessage({type: 'GET_CURRENT_TAB_ID'}, (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn('⚠️ Error getting tab ID:', chrome.runtime.lastError);
+            resolve(0);
+            return;
+          }
+          console.log('📋 Got tab ID:', response?.tabId);
+          resolve(response?.tabId || 0);
+        });
+      });
+    } catch (error) {
+      console.warn('Could not get current tab ID:', error);
+      return 0;
+    }
+  }
 }
 
-// Make test function available in console
-if (typeof window !== 'undefined') {
-  (window as any).testXHRHeaderCapture = testXHRHeaderCapture;
+// Declare global flag to prevent multiple initializations
+declare global {
+  interface Window {
+    __REQUEST_TRACKER_INITIALIZED__?: boolean;
+    __requestTracker__?: RequestTracker; // For debugging purposes
+  }
 }
 
-// ===== EXPLANATION COMMENT =====
-/*
-WHY getXHRHeaders() RETURNED EMPTY OBJECT BEFORE:
+// ⚡ CRITICAL: Initialize immediately to hook network APIs as early as possible
+console.log('🚀 Content script file loaded for:', location.href);
 
-XMLHttpRequest API Limitation:
-- xhr.open() → Can capture method, URL
-- xhr.send() → Can capture body  
-- xhr.getAllResponseHeaders() → Can get response headers
-- ❌ NO METHOD to get request headers after they're set
+const tracker = new RequestTracker();
 
-Solution:
-- Override xhr.setRequestHeader() to capture headers when they're set
-- Store headers in xhr._headers property
-- Use captured headers in getXHRHeaders()
+// Additional initialization for different document states (safety net)
+const initTracker = () => {
+  if (!window.__REQUEST_TRACKER_INITIALIZED__) {
+    console.log('🔄 Fallback tracker initialization');
+    new RequestTracker();
+  } else {
+    console.log('✅ Tracker already initialized, skipping fallback');
+  }
+};
 
-Now we can capture:
-✅ Request headers (via setRequestHeader override)
-✅ Request method, URL (via open override)  
-✅ Request body (via send override)
-✅ Response headers (via getAllResponseHeaders)
-✅ Response body (via responseText)
+// Multiple initialization points to ensure we never miss the early window
+if (document.readyState === 'loading') {
+  console.log('📄 Document still loading, setting up listeners');
+  document.addEventListener('DOMContentLoaded', initTracker);
+  document.addEventListener('readystatechange', initTracker);
+} else if (document.readyState === 'interactive' || document.readyState === 'complete') {
+  console.log('📄 Document already loaded, trying fallback init');
+  initTracker();
+}
 
-Complete request/response tracking achieved!
-*/
+// Extra safety: initialize on window load as well
+window.addEventListener('load', () => {
+  console.log('🪟 Window loaded, final fallback init');
+  initTracker();
+});
+
+// Export for potential debugging
+window.__requestTracker__ = tracker;
+
+// Debug current URL patterns
+console.log('🎯 Content script armed for URL:', location.href);
+console.log('🎯 Will track patterns:', [TRACKING_STOCK_LINK, ...ALTERNATIVE_TRACKING_PATTERNS]);

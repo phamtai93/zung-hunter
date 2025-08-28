@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Card, Button, Badge, Typography, Space, Divider } from 'antd';
+import { Card, Button, Badge, Typography, Space, Divider, ConfigProvider, App as AntdApp } from 'antd';
 import { 
   SettingOutlined, 
   DashboardOutlined, 
@@ -12,7 +12,7 @@ import '../styles/globals.css';
 
 const { Text, Title } = Typography;
 
-const Popup: React.FC = () => {
+const PopupContent: React.FC = () => {
   const [processingState, setProcessingState] = useState<any>({
     isProcessing: false,
     logs: []
@@ -52,8 +52,8 @@ const Popup: React.FC = () => {
 
   return (
     <div style={{ width: 300, padding: 16 }}>
-      <div className="text-center mb-4">
-        <Title level={4} className="mb-2">Link Scheduler</Title>
+      <div style={{ textAlign: 'center', marginBottom: 16 }}>
+        <Title level={4} style={{ marginBottom: 8 }}>Link Scheduler</Title>
         <Badge 
           status={processingState.isProcessing ? "processing" : "default"} 
           text={processingState.isProcessing ? "Active" : "Idle"}
@@ -101,9 +101,16 @@ const Popup: React.FC = () => {
       </Space>
 
       {processingState.isProcessing && (
-        <Card size="small" className="mt-4">
-          <Text strong className="block mb-2">Currently Processing</Text>
-          <div className="text-xs bg-gray-100 p-2 rounded max-h-20 overflow-y-auto">
+        <Card size="small" style={{ marginTop: 16 }}>
+          <Text strong style={{ display: 'block', marginBottom: 8 }}>Currently Processing</Text>
+          <div style={{ 
+            fontSize: '12px', 
+            backgroundColor: '#f5f5f5', 
+            padding: 8, 
+            borderRadius: 4, 
+            maxHeight: 80, 
+            overflowY: 'auto' 
+          }}>
             {processingState.logs.map((log: string, index: number) => (
               <div key={index}>{log}</div>
             ))}
@@ -111,6 +118,42 @@ const Popup: React.FC = () => {
         </Card>
       )}
     </div>
+  );
+};
+
+const Popup: React.FC = () => {
+  // Suppress WebSocket errors in extension environment
+  React.useEffect(() => {
+    const originalError = console.error;
+    console.error = (...args) => {
+      const message = args[0];
+      if (typeof message === 'string' && (
+        message.includes('WebSocket') || 
+        message.includes('ws://localhost') ||
+        message.includes('vite-hmr')
+      )) {
+        return;
+      }
+      originalError.apply(console, args);
+    };
+
+    return () => {
+      console.error = originalError;
+    };
+  }, []);
+
+  return (
+    <ConfigProvider
+      theme={{
+        token: {
+          colorPrimary: '#1890ff',
+        },
+      }}
+    >
+      <AntdApp>
+        <PopupContent />
+      </AntdApp>
+    </ConfigProvider>
   );
 };
 

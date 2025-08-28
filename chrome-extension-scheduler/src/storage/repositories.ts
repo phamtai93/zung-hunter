@@ -41,7 +41,19 @@ export class ScheduleRepository {
 
   // 🔧 ADD: Get all schedules (useful for admin/debugging)
   static async getAll(): Promise<Schedule[]> {
-    return await db.schedules.orderBy('createdAt').reverse().toArray();
+    try {
+      const schedules = await db.schedules.toArray();
+      // Sort by creation date if available, otherwise by nextRun
+      return schedules.sort((a, b) => {
+        if (a.createdAt && b.createdAt) {
+          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        }
+        return new Date(a.nextRun).getTime() - new Date(b.nextRun).getTime();
+      });
+    } catch (error) {
+      console.error('Error getting all schedules:', error);
+      return [];
+    }
   }
 
   // 🔧 ADD: Get schedules by status for filtering

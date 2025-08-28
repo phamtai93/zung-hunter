@@ -33,5 +33,5 @@ export default defineConfig({
   // Important for service worker
   define: {
     'process.env.NODE_ENV': JSON.stringify('production')
-  }
+  },
 })

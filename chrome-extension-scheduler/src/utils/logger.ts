@@ -61,6 +61,9 @@ export class Logger {
 
     // Store in chrome storage for persistence
     this.persistLogs();
+
+    // Send to dashboard if running in background script context
+    this.notifyDashboard(entry);
   }
 
   /**
@@ -192,5 +195,37 @@ export class Logger {
     });
 
     return stats;
+  }
+
+  /**
+   * Notify dashboard about new log entry (PRIVATE METHOD)
+   */
+  private static notifyDashboard(entry: LogEntry): void {
+    try {
+      // Only send from background script context
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        const message = {
+          type: 'NEW_LOG_ENTRY',
+          data: {
+            timestamp: entry.timestamp.toISOString(),
+            level: entry.level,
+            message: entry.message,
+            data: entry.data,
+            category: entry.category
+          }
+        };
+        
+        console.log('Logger sending message to dashboard:', message); // Debug log
+        
+        chrome.runtime.sendMessage(message).catch((error) => {
+          // Only log if it's not a "receiving end does not exist" error
+          if (error && !error.message?.includes('receiving end does not exist')) {
+            console.warn('Logger notification error:', error);
+          }
+        });
+      }
+    } catch (error) {
+      console.warn('Logger notification failed:', error);
+    }
   }
 }
