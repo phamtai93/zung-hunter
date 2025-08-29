@@ -5,7 +5,7 @@
   "description": "Schedule and monitor web link processing with multiple schedule types",
   "permissions": [
     "storage",
-    "alarms",
+    "alarms", 
     "activeTab",
     "background",
     "notifications",
@@ -14,46 +14,50 @@
     "webRequest"
   ],
   "host_permissions": [
-    "http://*/*",
-    "https://*/*"
+    "*://shopee.vn/*",
+    "*://*.shopee.vn/*"
   ],
   "background": {
-    "service_worker": "src/background/background.ts",
+    "service_worker": "background.js",
     "type": "module"
   },
   "action": {
     "default_popup": "src/popup/popup.html",
     "default_title": "Link Scheduler",
     "default_icon": {
-      "16": "src/assets/icons/icon16.png",
-      "48": "src/assets/icons/icon48.png",
-      "128": "src/assets/icons/icon128.png"
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
     }
   },
   "options_page": "src/options/options.html",
   "icons": {
-    "16": "src/assets/icons/icon16.png",
-    "48": "src/assets/icons/icon48.png",
-    "128": "src/assets/icons/icon128.png"
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["src/content/request-tracker.ts"],
+      "js": ["content-scripts/request-tracker.js"],
       "run_at": "document_start",
-      "all_frames": false,
-      "match_about_blank": false,
-      "match_origin_as_fallback": false
+      "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-scripts/main-world-interceptor.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
     {
       "resources": [
-        "src/assets/*",
-        "src/content/*"
+        "assets/*",
+        "content-scripts/*"
       ],
-      "matches": ["<all_urls>"],
-      "use_dynamic_url": false
+      "matches": ["<all_urls>"]
     }
   ]
 }

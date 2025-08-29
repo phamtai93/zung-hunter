@@ -1,596 +1,369 @@
-// src/content/request-tracker.ts
+// src/content/request-tracker.ts - Isolated World Bridge (CRXJS compatible)
 
-  const CONFIG = {
-    TRACKING_STOCK_LINK: 'https://shopee.vn/api/v4/pdp/get_pc',
-    ALTERNATIVE_PATTERNS: [
-      '/api/v4/pdp/get_pc',
-      'api/v4/pdp/get_pc', 
-      '/api/v4/item/get',
-      'api/v4/item/get',
-      '/api/v4/product/',
-      'api/v4/product/'
-    ],
-    MODELS_POSITION: 'data.item.models'
-  };
-
-// Simple interfaces
-interface TrackedRequestData {
-  requestId: string;
+interface TrackedRequest {
+  id: string;
+  scheduleId: string;
+  tabId: number;
   url: string;
   method: string;
-  headers: Record<string, string>;
-  body?: any;
-  timestamp: string;
+  requestHeaders: Record<string, string>;
+  requestBody?: string;
+  responseStatus?: number;
+  responseHeaders?: Record<string, string>;
+  responseBody?: string;
+  modelsData?: any;
+  timestamp: number;
+  source: 'fetch' | 'xhr';
+  completed: boolean;
 }
 
-// Global declarations
-declare global {
-  interface Window {
-    __REQUEST_TRACKER_INITIALIZED__?: boolean;
-    __requestTracker__?: RequestTracker;
-  }
+interface ExtensionSettings {
+  TRACKING_STOCK_LINK: string;
+  scheduleId: string;
+  tabId: number;
+  DEBUG?: boolean;
 }
 
-class RequestTracker {
-  private originalFetch!: typeof fetch;
-  private isInitialized: boolean = false;
-  private trackedCount: number = 0;
+class IsolatedWorldBridge {
+  private settings: ExtensionSettings | null = null;
+  private isInitialized = false;
+  private trackedRequests = new Map<string, TrackedRequest>();
+  private heartbeatInterval: number | null = null;
 
   constructor() {
-    // Prevent multiple initialization
-    if (window.__REQUEST_TRACKER_INITIALIZED__) {
-      console.log('🔄 RequestTracker already initialized');
-      return;
-    }
-
-    this.originalFetch = window.fetch.bind(window);
+    console.log('Isolated world bridge initializing...');
     this.init();
   }
 
-  private init(): void {
-    if (this.isInitialized) return;
-
-    try {
-      console.log('🚀 RequestTracker initializing for:', location.href);
-      console.log('🎯 Target patterns:', [CONFIG.TRACKING_STOCK_LINK, ...CONFIG.ALTERNATIVE_PATTERNS]);
-
-      // Mark as initialized immediately
-      window.__REQUEST_TRACKER_INITIALIZED__ = true;
-      this.isInitialized = true;
-
-      // Setup interceptors
-      this.setupFetchInterceptor();
-      this.setupXHRInterceptor();
-
-      // Test URL matching
-      this.testUrlPatterns();
-
-      // Notify background
-      this.notifyBackgroundReady();
-
-      console.log('✅ RequestTracker initialized successfully');
-
-    } catch (error) {
-      console.error('❌ Error initializing RequestTracker:', error);
-    }
+  private init() {
+    // Wait for settings from extension
+    this.waitForSettings();
+    
+    // Setup message listener from main world
+    this.setupMessageListener();
+    
+    // Setup periodic heartbeat to background
+    this.setupHeartbeat();
   }
 
-  private setupFetchInterceptor(): void {
-    const self = this;
-
-    console.log('🔧 Setting up fetch interceptor...');
-
-    window.fetch = async function(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-      let url: string;
-
-      // Extract URL from different input types
-      if (typeof input === 'string') {
-        url = input;
-      } else if (input instanceof URL) {
-        url = input.toString();
-      } else if (input instanceof Request) {
-        url = input.url;
-      } else {
-        url = String(input);
-      }
-
-      // Check if URL should be tracked
-      if (self.shouldTrackUrl(url)) {
-        console.log('🎯 FETCH INTERCEPTED:', url.substring(0, 100) + '...');
-        return self.handleTrackedFetch(input, init, url);
-      }
-
-      // Use original fetch for non-tracked URLs
-      return self.originalFetch.call(this, input, init);
-    };
-
-    console.log('✅ Fetch interceptor ready');
-  }
-
-  private async handleTrackedFetch(input: RequestInfo | URL, init: RequestInit | undefined, url: string): Promise<Response> {
-    const requestId = `fetch-${Date.now()}-${Math.random()}`;
-
-    try {
-      console.log('📤 Processing tracked fetch:', url);
-
-      // Capture request data
-      const method = init?.method || 'GET';
-      const requestHeaders = this.extractHeaders(init?.headers);
-      const requestBody = await this.extractBody(init?.body);
-
-      const requestData: TrackedRequestData = {
-        requestId,
-        url,
-        method,
-        headers: requestHeaders,
-        body: requestBody,
-        timestamp: new Date().toISOString()
-      };
-
-      console.log('📋 Request captured:', {
-        url: url.substring(0, 100) + '...',
-        method,
-        hasHeaders: Object.keys(requestHeaders).length > 0,
-        hasBody: !!requestBody
-      });
-
-      // Execute the actual request
-      const response = await this.originalFetch.call(window, input, init);
-
-      // Process response
-      await this.processResponse(response, requestData);
-
-      return response;
-
-    } catch (error) {
-      console.error('❌ Error in tracked fetch:', error);
-      // Still return the response even if tracking fails
-      return this.originalFetch.call(window, input, init);
-    }
-  }
-
-  private setupXHRInterceptor(): void {
-    const self = this;
-
-    console.log('🔧 Setting up XHR interceptor...');
-
-    const OriginalXHR = window.XMLHttpRequest;
-
-    window.XMLHttpRequest.prototype.open  = function() {
-      const xhr = new OriginalXHR();
-      const originalOpen = xhr.open;
-      const originalSend = xhr.send;
-      const originalSetRequestHeader = xhr.setRequestHeader;
-
-      let trackingData: any = null;
-
-      // Override open
-      xhr.open = function(method: string, url: string | URL, async?: boolean, username?: string | null, password?: string | null) {
-        const urlString = url.toString();
-
-        if (self.shouldTrackUrl(urlString)) {
-          console.log('🎯 XHR INTERCEPTED:', urlString.substring(0, 100) + '...');
-
-          trackingData = {
-            requestId: `xhr-${Date.now()}-${Math.random()}`,
-            url: urlString,
-            method: method,
-            headers: {},
-            timestamp: new Date().toISOString()
-          };
-        }
-
-        return originalOpen.call(this, method, url, async !== false, username, password);
-      };
-
-      // Override setRequestHeader to capture headers
-      xhr.setRequestHeader = function(name: string, value: string) {
-        if (trackingData) {
-          trackingData.headers[name] = value;
-        }
-        return originalSetRequestHeader.call(this, name, value);
-      };
-
-      // Override send
-      xhr.send = function(body?: Document | XMLHttpRequestBodyInit | null) {
-        if (trackingData) {
-          trackingData.body = self.extractBody(body);
-
-          console.log('📤 XHR request data captured:', {
-            url: trackingData.url,
-            method: trackingData.method,
-            hasBody: !!body
-          });
-
-          // Setup response listener
-          xhr.addEventListener('readystatechange', function() {
-            if (xhr.readyState === XMLHttpRequest.DONE && trackingData) {
-              self.processXHRResponse(xhr, trackingData);
-            }
-          });
-        }
-
-        return originalSend.call(this, body);
-      };
-
-      return xhr;
-    };
-
-    // Copy static properties
-    Object.setPrototypeOf(window.XMLHttpRequest, OriginalXHR);
-    Object.defineProperties(window.XMLHttpRequest, Object.getOwnPropertyDescriptors(OriginalXHR));
-
-    console.log('✅ XHR interceptor ready');
-  }
-
-  private async processResponse(response: Response, requestData: TrackedRequestData): Promise<void> {
-    try {
-      // Clone response to avoid consuming original
-      const responseClone = response.clone();
-      const responseHeaders = this.extractHeaders(response.headers);
-
-      // Get response body
-      let responseBody: any = null;
-      let responseText = '';
-
-      try {
-        responseText = await responseClone.text();
-        console.log('📥 Response received, length:', responseText.length);
-
-        // Try to parse as JSON
-        try {
-          responseBody = JSON.parse(responseText);
-          console.log('✅ Response parsed as JSON');
-        } catch (e) {
-          responseBody = responseText;
-          console.log('ℹ️ Response kept as text');
-        }
-      } catch (e) {
-        console.error('❌ Failed to read response:', e);
-        responseBody = 'Failed to read response';
-      }
-
-      // Extract models data
-      let modelsJson: any = null;
-      if (typeof responseBody === 'object' && responseBody) {
-        modelsJson = this.extractModels(responseBody);
-        if (modelsJson) {
-          console.log('🎯 Models data found!', {
-            type: typeof modelsJson,
-            isArray: Array.isArray(modelsJson),
-            length: Array.isArray(modelsJson) ? modelsJson.length : null
-          });
-        }
-      }
-
-      // Prepare complete data
-      const completeData = {
-        ...requestData,
-        response: {
-          status: response.status,
-          statusText: response.statusText,
-          headers: responseHeaders,
-          body: responseBody,
-          modelsJson: modelsJson
-        },
-        captureSource: 'fetch'
-      };
-
-      // Send to background script
-      await this.sendToBackground(completeData);
-
-      this.trackedCount++;
-      console.log(`✅ Request tracked successfully (${this.trackedCount} total)`);
-
-    } catch (error) {
-      console.error('❌ Error processing response:', error);
-    }
-  }
-
-  private processXHRResponse(xhr: XMLHttpRequest, requestData: any): void {
-    try {
-      const responseHeaders = this.parseXHRHeaders(xhr.getAllResponseHeaders());
-
-      let responseBody: any = xhr.responseText;
-      let modelsJson: any = null;
-
-      try {
-        const parsedResponse = JSON.parse(xhr.responseText);
-        responseBody = parsedResponse;
-        modelsJson = this.extractModels(parsedResponse);
-      } catch (e) {
-        // Keep as text
-      }
-
-      if (modelsJson) {
-        console.log('🎯 XHR Models data found!', {
-          type: typeof modelsJson,
-          isArray: Array.isArray(modelsJson),
-          length: Array.isArray(modelsJson) ? modelsJson.length : null
+  private waitForSettings() {
+    const checkSettings = () => {
+      const settings = (window as any).EXTENSION_SETTINGS;
+      if (settings?.TRACKING_STOCK_LINK) {
+        this.settings = settings;
+        console.log('Isolated world: Settings received', {
+          trackingUrl: settings.TRACKING_STOCK_LINK.substring(0, 50) + '...',
+          scheduleId: settings.scheduleId,
+          tabId: settings.tabId
         });
-      }
-
-      const completeData = {
-        ...requestData,
-        response: {
-          status: xhr.status,
-          statusText: xhr.statusText,
-          headers: responseHeaders,
-          body: responseBody,
-          modelsJson: modelsJson
-        },
-        captureSource: 'xhr'
-      };
-
-      this.sendToBackground(completeData);
-
-      this.trackedCount++;
-      console.log(`✅ XHR tracked successfully (${this.trackedCount} total)`);
-
-    } catch (error) {
-      console.error('❌ Error processing XHR response:', error);
-    }
-  }
-
-  private shouldTrackUrl(url: string): boolean {
-    try {
-      // Primary check
-      if (url.includes(CONFIG.TRACKING_STOCK_LINK)) {
-        console.log('✅ PRIMARY MATCH:', CONFIG.TRACKING_STOCK_LINK);
+        
+        // Now inject main world script
+        this.injectMainWorldScript();
         return true;
       }
+      return false;
+    };
 
-      // Alternative patterns
-      for (const pattern of CONFIG.ALTERNATIVE_PATTERNS) {
-        if (url.includes(pattern)) {
-          console.log('✅ ALTERNATIVE MATCH:', pattern);
-          return true;
+    // Try immediately
+    if (!checkSettings()) {
+      // Retry every 100ms for up to 10 seconds
+      let attempts = 0;
+      const maxAttempts = 100;
+      
+      const retryInterval = setInterval(() => {
+        attempts++;
+        if (checkSettings() || attempts >= maxAttempts) {
+          clearInterval(retryInterval);
+          if (attempts >= maxAttempts) {
+            console.error('Isolated world: Settings timeout - extension may not be properly configured');
+          }
         }
-      }
-
-      return false;
-
-    } catch (error) {
-      console.error('❌ Error checking URL:', error);
-      return false;
+      }, 100);
     }
   }
 
-  private extractModels(responseBody: any): any {
-    if (!responseBody || typeof responseBody !== 'object') {
-      return null;
-    }
-
+  private async injectMainWorldScript() {
     try {
-      const pathSegments = CONFIG.MODELS_POSITION.split('.');
-      let current = responseBody;
-
-      console.log('🔍 Extracting models using path:', CONFIG.MODELS_POSITION);
-
-      for (const segment of pathSegments) {
-        if (current && typeof current === 'object' && segment in current) {
-          current = current[segment];
-          console.log(`  ✅ Found segment '${segment}'`);
-        } else {
-          console.log(`  ❌ Segment '${segment}' not found`);
-          return null;
-        }
-      }
-
-      console.log('📊 Models extracted successfully:', {
-        type: typeof current,
-        isArray: Array.isArray(current),
-        length: Array.isArray(current) ? current.length : null
-      });
-
-      return current;
-
-    } catch (error) {
-      console.error('❌ Error extracting models:', error);
-      return null;
-    }
-  }
-
-  private async sendToBackground(data: any): Promise<void> {
-    try {
+      // Get current tab ID
       const tabId = await this.getCurrentTabId();
+      
+      // Read main world script content
+      const scriptUrl = chrome.runtime.getURL('src/content/main-world-interceptor.ts');
+      const response = await fetch(scriptUrl);
+      const scriptContent = await response.text();
+      
+      // Inject into main world via executeScript
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        code: scriptContent
+      } as any); // Type assertion to bypass Chrome API type issues
+      
+      console.log('Isolated world: Main world script injected successfully');
+      this.isInitialized = true;
+      
+    } catch (error) {
+      console.error('Isolated world: Failed to inject main world script:', error);
+      
+      // Fallback: Notify background to inject it
+      try {
+        chrome.runtime.sendMessage({
+          type: 'INJECT_MAIN_WORLD_SCRIPT',
+          tabId: this.settings?.tabId
+        });
+      } catch (msgError) {
+        console.error('Isolated world: Failed to request main world injection:', msgError);
+      }
+    }
+  }
 
-      const message = {
-        type: 'API_REQUEST_TRACKED',
-        data: {
-          ...data,
-          tabId,
-          pageUrl: window.location.href,
-          userAgent: navigator.userAgent
-        }
+  private setupMessageListener() {
+    window.addEventListener('message', (event) => {
+      // Only listen to messages from same origin
+      if (event.source !== window) return;
+
+      const message = event.data;
+      
+      switch (message.type) {
+        case 'REQUEST_INTERCEPTED':
+          this.handleInterceptedRequest(message.data);
+          break;
+          
+        case 'MAIN_WORLD_READY':
+          console.log('Isolated world: Main world interceptor is ready');
+          break;
+          
+        default:
+          // Ignore other messages
+          break;
+      }
+    });
+    
+    console.log('Isolated world: Message listener setup complete');
+  }
+
+  private async handleInterceptedRequest(data: any) {
+    if (!this.settings) {
+      console.warn('Isolated world: Received request but no settings available');
+      return;
+    }
+
+    try {
+      const trackedRequest: TrackedRequest = {
+        id: data.id,
+        scheduleId: this.settings.scheduleId,
+        tabId: this.settings.tabId,
+        url: data.url,
+        method: data.method,
+        requestHeaders: data.requestHeaders || {},
+        requestBody: data.requestBody,
+        responseStatus: data.responseStatus,
+        responseHeaders: data.responseHeaders || {},
+        responseBody: data.responseBody,
+        timestamp: data.timestamp,
+        source: data.id.startsWith('fetch_') ? 'fetch' : 'xhr',
+        completed: data.responseStatus !== undefined,
+        modelsData: null
       };
 
-      console.log('📤 Sending to background:', {
-        url: data.url?.substring(0, 100),
-        status: data.response?.status,
-        hasModels: !!data.response?.modelsJson
-      });
-
-      if (typeof chrome !== 'undefined' && chrome.runtime) {
-        chrome.runtime.sendMessage(message)
-          .then(response => {
-            console.log('✅ Background confirmed:', response);
-          })
-          .catch(error => {
-            console.warn('⚠️ Background communication failed:', error.message);
-          });
-      } else {
-        console.warn('⚠️ Chrome APIs not available');
+      // Extract models data if response is available
+      if (data.responseBody && data.responseStatus === 200) {
+        try {
+          const jsonData = JSON.parse(data.responseBody);
+          const modelsData = this.extractModelsData(jsonData);
+          if (modelsData) {
+            trackedRequest.modelsData = modelsData;
+            console.log('Isolated world: Models data extracted', {
+              id: data.id,
+              modelsCount: Array.isArray(modelsData) ? modelsData.length : 'not array'
+            });
+          }
+        } catch (parseError) {
+          // Response is not JSON, that's okay
+        }
       }
 
+      // Store in memory
+      this.trackedRequests.set(trackedRequest.id, trackedRequest);
+
+      // Save to storage immediately
+      await this.saveToStorage(trackedRequest);
+
+      console.log('Isolated world: Request processed and saved', {
+        id: trackedRequest.id,
+        url: trackedRequest.url.substring(0, 100),
+        status: trackedRequest.responseStatus,
+        hasModels: !!trackedRequest.modelsData
+      });
+
     } catch (error) {
-      console.error('❌ Error sending to background:', error);
+      console.error('Isolated world: Error handling intercepted request:', error);
     }
   }
 
-  private getCurrentTabId(): Promise<number> {
+  private extractModelsData(responseData: any): any {
+    if (!responseData || typeof responseData !== 'object') return null;
+
+    try {
+      // Primary path: data.item.models
+      if (responseData.data?.item?.models) {
+        return responseData.data.item.models;
+      }
+
+      // Alternative paths
+      if (responseData.item?.models) return responseData.item.models;
+      if (responseData.models) return responseData.models;
+
+      // Deep search
+      return this.searchForModels(responseData);
+      
+    } catch (error) {
+      console.error('Error extracting models data:', error);
+      return null;
+    }
+  }
+
+  private searchForModels(obj: any, depth = 0): any {
+    if (depth > 3 || !obj || typeof obj !== 'object') return null;
+
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === 'models' && Array.isArray(value)) {
+        return value;
+      }
+      
+      if (typeof value === 'object' && value !== null) {
+        const found = this.searchForModels(value, depth + 1);
+        if (found) return found;
+      }
+    }
+
+    return null;
+  }
+
+  private async saveToStorage(request: TrackedRequest) {
+    try {
+      const storageKey = `tracked_requests_${request.scheduleId}`;
+      
+      // Get existing data
+      const result = await chrome.storage.local.get(storageKey);
+      const existingData: TrackedRequest[] = result[storageKey] || [];
+      
+      // Update or add
+      const existingIndex = existingData.findIndex(item => item.id === request.id);
+      if (existingIndex >= 0) {
+        existingData[existingIndex] = request;
+      } else {
+        existingData.push(request);
+      }
+
+      // Limit storage size
+      if (existingData.length > 100) {
+        existingData.splice(0, existingData.length - 100);
+      }
+
+      await chrome.storage.local.set({ [storageKey]: existingData });
+
+    } catch (error) {
+      console.error('Isolated world: Error saving to storage:', error);
+    }
+  }
+
+  private setupHeartbeat() {
+    this.heartbeatInterval = setInterval(async () => {
+      if (!this.settings || !this.isInitialized) return;
+
+      const completedRequests = Array.from(this.trackedRequests.values()).filter(r => r.completed);
+      const modelsFound = completedRequests.filter(r => r.modelsData);
+
+      const summary = {
+        scheduleId: this.settings.scheduleId,
+        tabId: this.settings.tabId,
+        totalTracked: this.trackedRequests.size,
+        completedRequests: completedRequests.length,
+        modelsFound: modelsFound.length,
+        lastActivity: Date.now(),
+        isMainWorldActive: this.isInitialized
+      };
+
+      try {
+        chrome.runtime.sendMessage({
+          type: 'CONTENT_SCRIPT_HEARTBEAT',
+          data: summary
+        });
+      } catch (error) {
+        // Background script might not be available
+      }
+    }, 10000) as any;
+  }
+
+  private async getCurrentTabId(): Promise<number> {
     return new Promise((resolve) => {
       try {
-        if (typeof chrome !== 'undefined' && chrome.runtime) {
-          chrome.runtime.sendMessage({type: 'GET_CURRENT_TAB_ID'}, (response) => {
-            if (chrome.runtime.lastError) {
-              console.warn('Could not get tab ID:', chrome.runtime.lastError.message);
-              resolve(0);
-            } else {
-              resolve(response?.tabId || 0);
-            }
-          });
-        } else {
-          resolve(0);
-        }
-      } catch (error) {
-        console.warn('Error getting tab ID:', error);
-        resolve(0);
-      }
-    });
-  }
-
-  private notifyBackgroundReady(): void {
-    try {
-      if (typeof chrome !== 'undefined' && chrome.runtime) {
-        chrome.runtime.sendMessage({
-          type: 'CONTENT_SCRIPT_READY',
-          data: {
-            url: location.href,
-            timestamp: new Date().toISOString(),
-            userAgent: navigator.userAgent,
-            trackingPatterns: [CONFIG.TRACKING_STOCK_LINK, ...CONFIG.ALTERNATIVE_PATTERNS]
-          }
-        }).then(response => {
-          console.log('✅ Background notified:', response);
-        }).catch(error => {
-          console.warn('⚠️ Background notification failed (normal if dashboard not open):', error.message);
+        chrome.runtime.sendMessage({ type: 'GET_CURRENT_TAB_ID' }, (response) => {
+          resolve(response?.tabId || this.settings?.tabId || 0);
         });
-      }
-    } catch (error) {
-      console.warn('Could not notify background:', error);
-    }
-  }
-
-  private testUrlPatterns(): void {
-    const testUrls = [
-      'https://shopee.vn/api/v4/pdp/get_pc?item_id=123',
-      'https://shopee.vn/api/v4/pdp/get_pc',
-      'https://abc.shopee.vn/api/v4/pdp/get_pc?test=1',
-      'https://example.com/api/v4/item/get',
-      'https://random.com/not/matching/url'
-    ];
-
-    console.log('🧪 Testing URL patterns:');
-    testUrls.forEach(url => {
-      const matches = this.shouldTrackUrl(url);
-      console.log(`  ${matches ? '✅' : '❌'} ${url}`);
-    });
-  }
-
-  // Helper methods
-  private extractHeaders(headers: HeadersInit | Headers | undefined): Record<string, string> {
-    if (!headers) return {};
-
-    if (headers instanceof Headers) {
-      const obj: Record<string, string> = {};
-      headers.forEach((value, key) => {
-        obj[key] = value;
-      });
-      return obj;
-    }
-
-    if (Array.isArray(headers)) {
-      const obj: Record<string, string> = {};
-      headers.forEach(([key, value]) => {
-        obj[key] = value;
-      });
-      return obj;
-    }
-
-    return headers as Record<string, string>;
-  }
-
-  private parseXHRHeaders(headerStr: string): Record<string, string> {
-    const headers: Record<string, string> = {};
-    if (!headerStr) return headers;
-
-    headerStr.trim().split(/[\r\n]+/).forEach(line => {
-      const parts = line.split(': ');
-      const header = parts.shift();
-      const value = parts.join(': ');
-      if (header) {
-        headers[header.toLowerCase()] = value;
+      } catch (error) {
+        resolve(this.settings?.tabId || 0);
       }
     });
-
-    return headers;
   }
 
-  private extractBody(body: any): any {
-    if (!body) return null;
+  // Public methods for debugging and feature extension
+  public getStats() {
+    return {
+      isInitialized: this.isInitialized,
+      settings: this.settings,
+      trackedCount: this.trackedRequests.size,
+      completedCount: Array.from(this.trackedRequests.values()).filter(r => r.completed).length,
+      modelsCount: Array.from(this.trackedRequests.values()).filter(r => r.modelsData).length
+    };
+  }
 
-    if (typeof body === 'string') {
-      try {
-        return JSON.parse(body);
-      } catch (e) {
-        return body;
-      }
+  public getTrackedRequests() {
+    return Array.from(this.trackedRequests.values());
+  }
+
+  public clearTrackedRequests() {
+    this.trackedRequests.clear();
+    console.log('Isolated world: Tracked requests cleared');
+  }
+
+  // Future extension point
+  public async executeCustomAction(action: string, data?: any) {
+    console.log(`Isolated world: Custom action requested: ${action}`, data);
+    
+    // Example: Future features can be added here
+    switch (action) {
+      case 'EXTRACT_PAGE_DATA':
+        // Custom page data extraction
+        break;
+        
+      case 'MODIFY_REQUESTS':
+        // Request modification logic
+        break;
+        
+      default:
+        console.warn(`Unknown action: ${action}`);
     }
+  }
 
-    if (body instanceof FormData) {
-      const formObj: Record<string, any> = {};
-      body.forEach((value, key) => {
-        formObj[key] = value;
-      });
-      return formObj;
+  public destroy() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
-
-    if (body instanceof URLSearchParams) {
-      const params: Record<string, string> = {};
-      body.forEach((value, key) => {
-        params[key] = value;
-      });
-      return params;
-    }
-
-    return body;
+    this.trackedRequests.clear();
+    console.log('Isolated world bridge destroyed');
   }
 }
 
-// Initialize with multiple strategies
-function initRequestTracker(): void {
-  try {
-    if (!window.__REQUEST_TRACKER_INITIALIZED__) {
-      console.log('🔄 Initializing RequestTracker...');
-      const tracker = new RequestTracker();
-      window.__requestTracker__ = tracker;
-    }
-  } catch (error) {
-    console.error('❌ Failed to initialize RequestTracker:', error);
-  }
+// Initialize bridge
+const bridge = new IsolatedWorldBridge();
+
+// Export for debugging and future extensions
+if (typeof window !== 'undefined') {
+  (window as any).__isolatedWorldBridge__ = bridge;
+  console.log('Isolated world bridge available as window.__isolatedWorldBridge__');
 }
 
-// Multiple initialization strategies for maximum coverage
-console.log('📋 Document ready state:', document.readyState);
-
-// Strategy 1: Immediate (most important)
-initRequestTracker();
-
-// Strategy 2: DOM ready
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initRequestTracker);
-}
-
-// Strategy 3: Window load
-window.addEventListener('load', initRequestTracker);
-
-// Strategy 4: Delayed fallbacks
-setTimeout(initRequestTracker, 100);
-setTimeout(initRequestTracker, 500);
-setTimeout(initRequestTracker, 1000);
-
-console.log('✅ Content script setup complete for:', location.href);
-
-// Export for debugging
-export default RequestTracker;
+export default IsolatedWorldBridge;
