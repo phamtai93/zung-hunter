@@ -1,4 +1,4 @@
-// src/content/request-tracker.ts - Isolated World Bridge (CRXJS compatible)
+// src/content/request-tracker.ts - Simplified Content Script (Isolated World)
 
 interface TrackedRequest {
   id: string;
@@ -13,7 +13,7 @@ interface TrackedRequest {
   responseBody?: string;
   modelsData?: any;
   timestamp: number;
-  source: 'fetch' | 'xhr';
+  source: "fetch" | "xhr";
   completed: boolean;
 }
 
@@ -22,133 +22,156 @@ interface ExtensionSettings {
   scheduleId: string;
   tabId: number;
   DEBUG?: boolean;
+  injectedAt?: number;
 }
 
-class IsolatedWorldBridge {
+class RequestTracker {
   private settings: ExtensionSettings | null = null;
-  private isInitialized = false;
+  private isReady = false;
   private trackedRequests = new Map<string, TrackedRequest>();
   private heartbeatInterval: number | null = null;
+  private webRequestsTracked = 0;
+  private scriptInterceptionActive = false;
 
   constructor() {
-    console.log('Isolated world bridge initializing...');
+    console.log("🚀 Request Tracker initializing...");
     this.init();
   }
 
   private init() {
-    // Wait for settings from extension
+    // Wait for page to be ready
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => this.setup());
+    } else {
+      this.setup();
+    }
+  }
+
+  private setup() {
+    console.log("📡 Request Tracker setting up...");
+
+    // Wait for settings to be injected by background script
     this.waitForSettings();
-    
+
     // Setup message listener from main world
-    this.setupMessageListener();
-    
-    // Setup periodic heartbeat to background
-    this.setupHeartbeat();
+    this.setupMainWorldListener();
+
+    // Setup webRequest fallback tracking
+    this.setupWebRequestFallback();
+
+    // Start heartbeat
+    this.startHeartbeat();
   }
 
   private waitForSettings() {
+    const maxAttempts = 50; // 5 seconds with 100ms intervals
+    let attempts = 0;
+
     const checkSettings = () => {
+      attempts++;
       const settings = (window as any).EXTENSION_SETTINGS;
+
       if (settings?.TRACKING_STOCK_LINK) {
         this.settings = settings;
-        console.log('Isolated world: Settings received', {
-          trackingUrl: settings.TRACKING_STOCK_LINK.substring(0, 50) + '...',
+        console.log("✅ Settings received:", {
+          trackingUrl: settings.TRACKING_STOCK_LINK.substring(0, 50) + "...",
           scheduleId: settings.scheduleId,
-          tabId: settings.tabId
+          tabId: settings.tabId,
+          injectedAt: settings.injectedAt
+            ? new Date(settings.injectedAt).toLocaleTimeString()
+            : "unknown",
         });
-        
-        // Now inject main world script
-        this.injectMainWorldScript();
+
+        this.isReady = true;
         return true;
       }
+
+      if (attempts >= maxAttempts) {
+        console.error(
+          "❌ Settings timeout - extension not properly configured"
+        );
+        return true; // Stop trying
+      }
+
       return false;
     };
 
-    // Try immediately
     if (!checkSettings()) {
-      // Retry every 100ms for up to 10 seconds
-      let attempts = 0;
-      const maxAttempts = 100;
-      
       const retryInterval = setInterval(() => {
-        attempts++;
-        if (checkSettings() || attempts >= maxAttempts) {
+        if (checkSettings()) {
           clearInterval(retryInterval);
-          if (attempts >= maxAttempts) {
-            console.error('Isolated world: Settings timeout - extension may not be properly configured');
-          }
         }
       }, 100);
     }
   }
 
-  private async injectMainWorldScript() {
-    try {
-      // Get current tab ID
-      const tabId = await this.getCurrentTabId();
-      
-      // Read main world script content
-      const scriptUrl = chrome.runtime.getURL('src/content/main-world-interceptor.ts');
-      const response = await fetch(scriptUrl);
-      const scriptContent = await response.text();
-      
-      // Inject into main world via executeScript
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        world: 'MAIN',
-        code: scriptContent
-      } as any); // Type assertion to bypass Chrome API type issues
-      
-      console.log('Isolated world: Main world script injected successfully');
-      this.isInitialized = true;
-      
-    } catch (error) {
-      console.error('Isolated world: Failed to inject main world script:', error);
-      
-      // Fallback: Notify background to inject it
-      try {
-        chrome.runtime.sendMessage({
-          type: 'INJECT_MAIN_WORLD_SCRIPT',
-          tabId: this.settings?.tabId
-        });
-      } catch (msgError) {
-        console.error('Isolated world: Failed to request main world injection:', msgError);
-      }
-    }
-  }
-
-  private setupMessageListener() {
-    window.addEventListener('message', (event) => {
-      // Only listen to messages from same origin
+  private setupMainWorldListener() {
+    window.addEventListener("message", (event) => {
+      // Only accept messages from same origin
       if (event.source !== window) return;
 
       const message = event.data;
-      
+
       switch (message.type) {
-        case 'REQUEST_INTERCEPTED':
+        case "REQUEST_INTERCEPTED":
           this.handleInterceptedRequest(message.data);
           break;
-          
-        case 'MAIN_WORLD_READY':
-          console.log('Isolated world: Main world interceptor is ready');
+
+        case "MAIN_WORLD_READY":
+          console.log("✅ Main world interceptor is ready");
+          this.scriptInterceptionActive = true;
           break;
-          
+
         default:
           // Ignore other messages
           break;
       }
     });
-    
-    console.log('Isolated world: Message listener setup complete');
+
+    console.log("📨 Main world message listener setup complete");
+  }
+
+  private setupWebRequestFallback() {
+    // This is a fallback method using webRequest API through background script
+    // Note: This is less reliable than script injection but provides backup
+
+    console.log("🔄 WebRequest fallback setup (limited data available)");
+
+    // We'll track navigation requests to know when main world might have new data
+    const navigationObserver = new PerformanceObserver((list) => {
+      const entries = list.getEntries();
+      entries.forEach((entry) => {
+        if (entry.name && this.isTrackingUrl(entry.name)) {
+          this.webRequestsTracked++;
+          console.log(
+            "🌐 Navigation to tracking URL detected:",
+            entry.name.substring(0, 100)
+          );
+        }
+      });
+    });
+
+    try {
+      navigationObserver.observe({ entryTypes: ["navigation", "resource"] });
+    } catch (error) {
+      console.warn("⚠️ Performance observer setup failed:", error);
+    }
   }
 
   private async handleInterceptedRequest(data: any) {
-    if (!this.settings) {
-      console.warn('Isolated world: Received request but no settings available');
+    if (!this.settings || !this.isReady) {
+      console.warn("⚠️ Received request but tracker not ready");
       return;
     }
 
     try {
+      console.log("📊 Processing intercepted request:", {
+        id: data.id,
+        url: data.url.substring(0, 100) + "...",
+        method: data.method,
+        status: data.responseStatus,
+      });
+
       const trackedRequest: TrackedRequest = {
         id: data.id,
         scheduleId: this.settings.scheduleId,
@@ -161,25 +184,26 @@ class IsolatedWorldBridge {
         responseHeaders: data.responseHeaders || {},
         responseBody: data.responseBody,
         timestamp: data.timestamp,
-        source: data.id.startsWith('fetch_') ? 'fetch' : 'xhr',
+        source: data.id.startsWith("fetch_") ? "fetch" : "xhr",
         completed: data.responseStatus !== undefined,
-        modelsData: null
+        modelsData: null,
       };
 
-      // Extract models data if response is available
+      // Extract models data if response is available and successful
       if (data.responseBody && data.responseStatus === 200) {
-        try {
-          const jsonData = JSON.parse(data.responseBody);
-          const modelsData = this.extractModelsData(jsonData);
-          if (modelsData) {
-            trackedRequest.modelsData = modelsData;
-            console.log('Isolated world: Models data extracted', {
-              id: data.id,
-              modelsCount: Array.isArray(modelsData) ? modelsData.length : 'not array'
-            });
-          }
-        } catch (parseError) {
-          // Response is not JSON, that's okay
+        const modelsData = this.extractModelsData(data.responseBody);
+        if (modelsData) {
+          trackedRequest.modelsData = modelsData;
+          console.log("📦 Models data extracted:", {
+            id: data.id,
+            modelsCount: Array.isArray(modelsData)
+              ? modelsData.length
+              : "not array",
+            sampleKeys:
+              Array.isArray(modelsData) && modelsData.length > 0
+                ? Object.keys(modelsData[0] || {}).slice(0, 3)
+                : "none",
+          });
         }
       }
 
@@ -189,49 +213,52 @@ class IsolatedWorldBridge {
       // Save to storage immediately
       await this.saveToStorage(trackedRequest);
 
-      console.log('Isolated world: Request processed and saved', {
+      console.log("✅ Request processed and saved:", {
         id: trackedRequest.id,
-        url: trackedRequest.url.substring(0, 100),
-        status: trackedRequest.responseStatus,
-        hasModels: !!trackedRequest.modelsData
+        completed: trackedRequest.completed,
+        hasModels: !!trackedRequest.modelsData,
+        totalTracked: this.trackedRequests.size,
       });
-
     } catch (error) {
-      console.error('Isolated world: Error handling intercepted request:', error);
+      console.error("❌ Error handling intercepted request:", error);
     }
   }
 
-  private extractModelsData(responseData: any): any {
-    if (!responseData || typeof responseData !== 'object') return null;
-
+  private extractModelsData(responseBody: string): any {
     try {
-      // Primary path: data.item.models
-      if (responseData.data?.item?.models) {
-        return responseData.data.item.models;
-      }
-
-      // Alternative paths
-      if (responseData.item?.models) return responseData.item.models;
-      if (responseData.models) return responseData.models;
-
-      // Deep search
-      return this.searchForModels(responseData);
-      
+      const jsonData = JSON.parse(responseBody);
+      return this.findModelsInData(jsonData);
     } catch (error) {
-      console.error('Error extracting models data:', error);
+      // Response is not JSON
       return null;
     }
   }
 
-  private searchForModels(obj: any, depth = 0): any {
-    if (depth > 3 || !obj || typeof obj !== 'object') return null;
+  private findModelsInData(data: any): any {
+    if (!data || typeof data !== "object") return null;
+
+    // Primary path: data.item.models
+    if (data.data?.item?.models) {
+      return data.data.item.models;
+    }
+
+    // Alternative paths
+    if (data.item?.models) return data.item.models;
+    if (data.models) return data.models;
+
+    // Deep search (limited depth to avoid performance issues)
+    return this.searchForModels(data, 0);
+  }
+
+  private searchForModels(obj: any, depth: number): any {
+    if (depth > 3 || !obj || typeof obj !== "object") return null;
 
     for (const [key, value] of Object.entries(obj)) {
-      if (key === 'models' && Array.isArray(value)) {
+      if (key === "models" && Array.isArray(value) && value.length > 0) {
         return value;
       }
-      
-      if (typeof value === 'object' && value !== null) {
+
+      if (typeof value === "object" && value !== null) {
         const found = this.searchForModels(value, depth + 1);
         if (found) return found;
       }
@@ -243,108 +270,95 @@ class IsolatedWorldBridge {
   private async saveToStorage(request: TrackedRequest) {
     try {
       const storageKey = `tracked_requests_${request.scheduleId}`;
-      
+
       // Get existing data
       const result = await chrome.storage.local.get(storageKey);
       const existingData: TrackedRequest[] = result[storageKey] || [];
-      
+
       // Update or add
-      const existingIndex = existingData.findIndex(item => item.id === request.id);
+      const existingIndex = existingData.findIndex(
+        (item) => item.id === request.id
+      );
       if (existingIndex >= 0) {
         existingData[existingIndex] = request;
       } else {
         existingData.push(request);
       }
 
-      // Limit storage size
-      if (existingData.length > 100) {
-        existingData.splice(0, existingData.length - 100);
+      // Limit storage size (keep last 200 requests per schedule)
+      if (existingData.length > 200) {
+        existingData.splice(0, existingData.length - 200);
       }
 
       await chrome.storage.local.set({ [storageKey]: existingData });
-
     } catch (error) {
-      console.error('Isolated world: Error saving to storage:', error);
+      console.error("❌ Error saving to storage:", error);
     }
   }
 
-  private setupHeartbeat() {
-    this.heartbeatInterval = setInterval(async () => {
-      if (!this.settings || !this.isInitialized) return;
+  private startHeartbeat() {
+    this.heartbeatInterval = setInterval(() => {
+      if (!this.settings || !this.isReady) return;
 
-      const completedRequests = Array.from(this.trackedRequests.values()).filter(r => r.completed);
-      const modelsFound = completedRequests.filter(r => r.modelsData);
+      const completedRequests = Array.from(
+        this.trackedRequests.values()
+      ).filter((r) => r.completed);
+      const modelsFound = completedRequests.filter((r) => r.modelsData);
 
-      const summary = {
+      const heartbeatData = {
         scheduleId: this.settings.scheduleId,
         tabId: this.settings.tabId,
         totalTracked: this.trackedRequests.size,
         completedRequests: completedRequests.length,
         modelsFound: modelsFound.length,
+        webRequestsTracked: this.webRequestsTracked,
+        scriptInterceptionActive: this.scriptInterceptionActive,
         lastActivity: Date.now(),
-        isMainWorldActive: this.isInitialized
       };
 
       try {
         chrome.runtime.sendMessage({
-          type: 'CONTENT_SCRIPT_HEARTBEAT',
-          data: summary
+          type: "CONTENT_SCRIPT_HEARTBEAT",
+          data: heartbeatData,
         });
       } catch (error) {
         // Background script might not be available
+        console.warn(
+          "⚠️ Heartbeat failed - background script may be unavailable"
+        );
       }
-    }, 10000) as any;
+    }, 10000) as any; // 10 second intervals
   }
 
-  private async getCurrentTabId(): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        chrome.runtime.sendMessage({ type: 'GET_CURRENT_TAB_ID' }, (response) => {
-          resolve(response?.tabId || this.settings?.tabId || 0);
-        });
-      } catch (error) {
-        resolve(this.settings?.tabId || 0);
-      }
-    });
+  private isTrackingUrl(url: string): boolean {
+    if (!this.settings?.TRACKING_STOCK_LINK) return false;
+    return url.includes(this.settings.TRACKING_STOCK_LINK);
   }
 
-  // Public methods for debugging and feature extension
+  // Public methods for debugging
   public getStats() {
     return {
-      isInitialized: this.isInitialized,
+      isReady: this.isReady,
       settings: this.settings,
       trackedCount: this.trackedRequests.size,
-      completedCount: Array.from(this.trackedRequests.values()).filter(r => r.completed).length,
-      modelsCount: Array.from(this.trackedRequests.values()).filter(r => r.modelsData).length
+      completedCount: Array.from(this.trackedRequests.values()).filter(
+        (r) => r.completed
+      ).length,
+      modelsCount: Array.from(this.trackedRequests.values()).filter(
+        (r) => r.modelsData
+      ).length,
+      webRequestsTracked: this.webRequestsTracked,
+      scriptInterceptionActive: this.scriptInterceptionActive,
     };
   }
 
-  public getTrackedRequests() {
+  public getTrackedRequests(): TrackedRequest[] {
     return Array.from(this.trackedRequests.values());
   }
 
   public clearTrackedRequests() {
     this.trackedRequests.clear();
-    console.log('Isolated world: Tracked requests cleared');
-  }
-
-  // Future extension point
-  public async executeCustomAction(action: string, data?: any) {
-    console.log(`Isolated world: Custom action requested: ${action}`, data);
-    
-    // Example: Future features can be added here
-    switch (action) {
-      case 'EXTRACT_PAGE_DATA':
-        // Custom page data extraction
-        break;
-        
-      case 'MODIFY_REQUESTS':
-        // Request modification logic
-        break;
-        
-      default:
-        console.warn(`Unknown action: ${action}`);
-    }
+    console.log("🧹 Tracked requests cleared");
   }
 
   public destroy() {
@@ -353,17 +367,29 @@ class IsolatedWorldBridge {
       this.heartbeatInterval = null;
     }
     this.trackedRequests.clear();
-    console.log('Isolated world bridge destroyed');
+    console.log("💀 Request tracker destroyed");
   }
 }
 
-// Initialize bridge
-const bridge = new IsolatedWorldBridge();
+// Initialize tracker when DOM is ready
+let tracker: RequestTracker | null = null;
 
-// Export for debugging and future extensions
-if (typeof window !== 'undefined') {
-  (window as any).__isolatedWorldBridge__ = bridge;
-  console.log('Isolated world bridge available as window.__isolatedWorldBridge__');
+const initTracker = () => {
+  if (!tracker) {
+    tracker = new RequestTracker();
+
+    // Export for debugging
+    (window as any).__requestTracker__ = tracker;
+    console.log("🔍 Request tracker available as window.__requestTracker__");
+  }
+};
+
+// Initialize based on DOM state
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initTracker);
+} else {
+  initTracker();
 }
 
-export default IsolatedWorldBridge;
+console.log("📡 Request tracker script loaded");
+export default RequestTracker;

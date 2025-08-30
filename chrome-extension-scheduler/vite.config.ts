@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
-import { copyFileSync, mkdirSync, existsSync } from 'fs'
+import { copyFileSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs'
 
 export default defineConfig(({ mode }) => {
   const isDev = mode === 'development'
@@ -14,27 +14,53 @@ export default defineConfig(({ mode }) => {
         name: 'copy-extension-files',
         buildStart() {
           // Ensure directories exist
-          if (!existsSync('dist/content-scripts')) mkdirSync('dist/content-scripts', { recursive: true })
+          if (!existsSync('dist/content-scripts')) {
+            mkdirSync('dist/content-scripts', { recursive: true })
+          }
         },
         writeBundle() {
           try {
-            // Copy manifest.json
-            copyFileSync('manifest.json', 'dist/manifest.json')
-            if (!existsSync('dist/icons')) mkdirSync('dist/icons', { recursive: true })
-            if (!existsSync('dist')) mkdirSync('dist', { recursive: true })
+            // Copy and process manifest.json
+            if (existsSync('manifest.json')) {
+              const manifestContent = readFileSync('manifest.json', 'utf8')
+              const manifest = JSON.parse(manifestContent)
+              
+              writeFileSync('dist/manifest.json', JSON.stringify(manifest, null, 2))
+              console.log('✅ Manifest copied and processed')
+            } else {
+              console.error('❌ manifest.json not found in root directory')
+            }
+            
+            if (!existsSync('dist/icons')) {
+              mkdirSync('dist/icons', { recursive: true })
+            }
+
             // Copy icons
             const iconSizes = ['16', '48', '128']
             iconSizes.forEach(size => {
-              console.log("copy icon" + size);
               const iconPath = `src/assets/icons/icon${size}.png`
               if (existsSync(iconPath)) {
                 copyFileSync(iconPath, `dist/icons/icon${size}.png`)
+                console.log(`✅ Icon ${size} copied`)
+              } else {
+                console.warn(`⚠️ Icon ${size} not found at ${iconPath}`)
               }
             })
+
+            if (!existsSync('dist/src/content')) {
+              mkdirSync('dist/src/content', { recursive: true })
+            }
             
-            console.log('✅ Extension files copied successfully')
+            // Copy main world interceptor as web accessible resource
+            const mainWorldSource = 'src/content/main-world-interceptor.ts'
+            if (existsSync(mainWorldSource)) {
+              copyFileSync(mainWorldSource, 'dist/src/content/main-world-interceptor.ts')
+              console.log('✅ Main world interceptor copied as web accessible resource')
+            }
+            
+            console.log('✅ All extension files processed successfully')
           } catch (error) {
-            console.warn('⚠️ Warning: Could not copy extension files:', error.message)
+            console.error('❌ Error copying extension files:', error)
           }
         }
       }
@@ -49,7 +75,7 @@ export default defineConfig(({ mode }) => {
       watch: isDev ? {} : null,
       rollupOptions: {
         input: {
-          // Background script
+          // Background service worker
           background: 'src/background/background.ts',
           
           // Content scripts
@@ -69,7 +95,7 @@ export default defineConfig(({ mode }) => {
               return 'background.js'
             }
             
-            // Content scripts - keep the folder structure
+            // Content scripts - maintain folder structure
             if (name.includes('content-scripts/')) {
               return `${name}.js`
             }
@@ -77,7 +103,7 @@ export default defineConfig(({ mode }) => {
             // Other entries
             return `${name}.js`
           },
-          chunkFileNames: 'chunks/[name].js',
+          chunkFileNames: 'chunks/[name]-[hash].js',
           assetFileNames: (assetInfo) => {
             const name = assetInfo.name
             
@@ -92,9 +118,10 @@ export default defineConfig(({ mode }) => {
             }
             
             // Other assets
-            return 'assets/[name].[ext]'
+            return 'assets/[name]-[hash].[ext]'
           }
-        }
+        },
+        external: ['chrome']
       }
     },
     
@@ -112,7 +139,7 @@ export default defineConfig(({ mode }) => {
     
     esbuild: {
       target: 'es2020',
-      drop: isDev ? [] : ['console', 'debugger']
+      drop: isDev ? [] : []  // Keep console logs for debugging in extensions
     },
     
     optimizeDeps: {

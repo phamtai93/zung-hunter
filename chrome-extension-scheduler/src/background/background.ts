@@ -1,4 +1,4 @@
-// src/background/background.ts - Hybrid Architecture Support
+// src/background/background.ts - Simplified Background Script
 
 import { ScheduleRepository, LinkRepository, HistoryRepository } from '../storage/repositories';
 import { Logger } from '../utils/logger';
@@ -14,98 +14,99 @@ interface ActiveTab {
   startTime: Date;
   historyId: string;
   url: string;
-  settingsInjected: boolean;
-  isolatedWorldReady: boolean;
-  mainWorldReady: boolean;
-  lastHeartbeat?: Date;
+  status: 'loading' | 'injecting' | 'ready' | 'tracking' | 'error' | 'completed';
   trackedCount: number;
+  lastHeartbeat?: Date;
+  closeTimer?: number;
 }
 
-class HybridBackgroundManager {
+class BackgroundManager {
   private isRunning = false;
-  private activeTabs: Map<number, ActiveTab> = new Map();
+  private activeTabs = new Map<number, ActiveTab>();
   
   constructor() {
     this.init();
   }
 
   private async init() {
-    console.log('Hybrid Background Manager initializing...');
+    console.log('Background Manager initializing...');
     
+    // Load stored logs
     await Logger.loadStoredLogs();
     
+    // Setup event listeners
     this.setupMessageListener();
-    this.setupAlarmListener();
+    this.setupAlarmListener(); 
     this.setupTabListener();
+    
+    // Auto-start scheduler
     this.startScheduler();
     
-    console.log('Hybrid Background Manager initialized');
+    console.log('Background Manager initialized');
+    Logger.info('Background Manager started', {}, 'BACKGROUND');
   }
 
   private setupMessageListener() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
-        switch (message.type) {
-          case 'START_SCHEDULER':
-            this.startScheduler();
-            sendResponse({ success: true, isRunning: this.isRunning });
-            break;
-
-          case 'STOP_SCHEDULER':
-            this.stopScheduler();
-            sendResponse({ success: true, isRunning: this.isRunning });
-            break;
-
-          case 'GET_SCHEDULER_STATUS':
-            sendResponse({ isRunning: this.isRunning });
-            break;
-
-          case 'GET_ACTIVE_TABS':
-            const tabs = Array.from(this.activeTabs.values()).map(tab => ({
-              id: tab.tabId.toString(),
-              linkName: tab.linkName,
-              url: tab.url,
-              startTime: tab.startTime.toISOString(),
-              status: this.getTabStatus(tab),
-              requestCount: tab.trackedCount,
-              settingsInjected: tab.settingsInjected,
-              isolatedWorldReady: tab.isolatedWorldReady,
-              mainWorldReady: tab.mainWorldReady
-            }));
-            sendResponse({ tabs });
-            break;
-
-          case 'CONTENT_SCRIPT_HEARTBEAT':
-            this.handleHeartbeat(message.data, sender);
-            sendResponse({ success: true });
-            break;
-
-          case 'INJECT_MAIN_WORLD_SCRIPT':
-            this.injectMainWorldScript(message.tabId).then((success) => {
-              sendResponse({ success });
-            });
-            return true;
-
-          case 'GET_TRACKED_DATA':
-            this.getTrackedDataForSchedule(message.scheduleId).then(sendResponse);
-            return true;
-
-          case 'GET_CURRENT_TAB_ID':
-            const tabId = sender.tab?.id || 0;
-            sendResponse({ tabId });
-            break;
-
-          default:
-            sendResponse({ error: 'Unknown message type' });
-        }
+        this.handleMessage(message, sender, sendResponse);
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        console.error('Error handling message:', errorMsg);
-        sendResponse({ error: errorMsg });
+        console.error('Message handler error:', error);
+        sendResponse({ error: error instanceof Error ? error.message : 'Unknown error' });
       }
-      
-      return true;
+      return true; // Keep channel open for async responses
     });
+  }
+
+  private async handleMessage(message: any, sender: chrome.runtime.MessageSender, sendResponse: (response: any) => void) {
+    switch (message.type) {
+      case 'START_SCHEDULER':
+        this.startScheduler();
+        sendResponse({ success: true, isRunning: this.isRunning });
+        break;
+
+      case 'STOP_SCHEDULER':
+        this.stopScheduler();
+        sendResponse({ success: true, isRunning: this.isRunning });
+        break;
+
+      case 'GET_SCHEDULER_STATUS':
+        sendResponse({ isRunning: this.isRunning });
+        break;
+
+      case 'GET_ACTIVE_TABS':
+        const tabs = Array.from(this.activeTabs.values()).map(tab => ({
+          id: tab.tabId.toString(),
+          linkName: tab.linkName,
+          url: tab.url,
+          startTime: tab.startTime.toISOString(),
+          status: tab.status,
+          requestCount: tab.trackedCount
+        }));
+        sendResponse({ tabs });
+        break;
+
+      case 'CONTENT_SCRIPT_HEARTBEAT':
+        this.handleHeartbeat(message.data, sender);
+        sendResponse({ success: true });
+        break;
+
+      case 'GET_TRACKED_DATA':
+        try {
+          const data = await this.getTrackedDataForSchedule(message.scheduleId);
+          sendResponse({ data });
+        } catch (error) {
+          sendResponse({ error: error instanceof Error ? error.message : 'Unknown error' });
+        }
+        break;
+
+      case 'GET_CURRENT_TAB_ID':
+        sendResponse({ tabId: sender.tab?.id || 0 });
+        break;
+
+      default:
+        sendResponse({ error: 'Unknown message type' });
+    }
   }
 
   private setupAlarmListener() {
@@ -117,15 +118,19 @@ class HybridBackgroundManager {
   }
 
   private setupTabListener() {
+    // Handle tab removal
     chrome.tabs.onRemoved.addListener((tabId) => {
       this.handleTabRemoved(tabId);
     });
 
-    chrome.tabs.onUpdated.addListener((tabId, changeInfo, _tab) => {
+    // Handle tab updates
+    chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       const activeTab = this.activeTabs.get(tabId);
-      if (activeTab && changeInfo.status === 'complete') {
-        // Re-inject if page reloaded
-        this.ensureScriptsInjected(tabId);
+      if (!activeTab) return;
+
+      // If page completed loading, inject scripts
+      if (changeInfo.status === 'complete' && tab.url) {
+        await this.injectScripts(tabId);
       }
     });
   }
@@ -134,15 +139,18 @@ class HybridBackgroundManager {
     if (this.isRunning) return;
     
     this.isRunning = true;
-    Logger.info('Hybrid scheduler started', {}, 'SCHEDULER');
+    Logger.info('Scheduler started', {}, 'SCHEDULER');
     
+    // Check for due schedules every 30 seconds
     chrome.alarms.create('scheduler-check', { periodInMinutes: 0.5 });
+    
+    // Run initial check
     this.checkDueSchedules();
   }
 
   private stopScheduler() {
     this.isRunning = false;
-    Logger.info('Hybrid scheduler stopped', {}, 'SCHEDULER');
+    Logger.info('Scheduler stopped', {}, 'SCHEDULER');
     
     chrome.alarms.clear('scheduler-check');
     this.closeAllActiveTabs();
@@ -168,48 +176,55 @@ class HybridBackgroundManager {
   private async executeSchedule(schedule: Schedule) {
     try {
       const link = await LinkRepository.getById(schedule.linkId);
-      if (!link?.enabled) return;
+      if (!link?.enabled) {
+        Logger.warning('Link not found or disabled', { scheduleId: schedule.id }, 'SCHEDULER');
+        return;
+      }
 
       Logger.info(`Executing schedule: ${schedule.name}`, {
         scheduleId: schedule.id,
-        linkId: link.id
+        linkName: link.name,
+        quantity: schedule.quantity
       }, 'EXECUTION');
 
+      // Create execution history
       const historyData = await HistoryRepository.create({
         linkId: link.id,
         scheduleId: schedule.id,
         startTime: new Date(),
         success: false,
-        logs: [`Started hybrid execution for ${link.name}`]
+        logs: [`Started execution for ${link.name}`]
       });
 
-      // Open tabs
+      // Open tabs for this schedule
       for (let i = 0; i < schedule.quantity; i++) {
-        await this.openTrackedTab(link, schedule, historyData.id, i);
+        await this.openTrackedTab(link, schedule, historyData.id);
+        
+        // Small delay between tab openings to avoid overwhelming
+        if (i < schedule.quantity - 1) {
+          await this.delay(1000);
+        }
       }
 
-      // Update next run
-      if (schedule.type !== 'once') {
-        const nextRun = SchedulerEngine.calculateNextRun(schedule);
-        await ScheduleRepository.updateNextRun(schedule.id, nextRun);
-      } else {
-        await ScheduleRepository.update(schedule.id, { enabled: false });
-      }
+      // Update next run time
+      await this.updateScheduleNextRun(schedule);
 
     } catch (error) {
-      Logger.error('Error executing schedule', error, 'SCHEDULER');
+      Logger.error('Error executing schedule', error, 'EXECUTION');
     }
   }
 
-  private async openTrackedTab(link: Link, schedule: Schedule, historyId: string, _index: number) {
+  private async openTrackedTab(link: Link, schedule: Schedule, historyId: string) {
     try {
+      // Create new tab
       const tab = await chrome.tabs.create({
         url: link.url,
-        active: false
+        active: false  // Keep tabs in background
       });
 
       if (!tab.id) throw new Error('Failed to create tab');
 
+      // Track this tab
       const activeTab: ActiveTab = {
         tabId: tab.id,
         linkId: link.id,
@@ -218,114 +233,128 @@ class HybridBackgroundManager {
         startTime: new Date(),
         historyId,
         url: link.url,
-        settingsInjected: false,
-        isolatedWorldReady: false,
-        mainWorldReady: false,
+        status: 'loading',
         trackedCount: 0
       };
 
       this.activeTabs.set(tab.id, activeTab);
 
-      Logger.info('Tab opened for hybrid tracking', {
+      // Schedule tab closure
+      activeTab.closeTimer = setTimeout(() => {
+        this.closeTab(tab.id!);
+      }, TAB_CLOSE_TIMEOUT_MS) as any;
+
+      Logger.info('Tab opened for tracking', {
         tabId: tab.id,
         linkName: link.name,
         url: link.url
       }, `TAB_${tab.id}`);
 
-      // Start injection process
-      this.ensureScriptsInjected(tab.id);
-
-      // Schedule tab closure
-      setTimeout(() => {
-        this.closeTab(tab.id!);
-      }, TAB_CLOSE_TIMEOUT_MS);
+      // Notify dashboard
+      this.notifyDashboard('TAB_OPENED', {
+        tabId: tab.id,
+        linkName: link.name,
+        url: link.url,
+        startTime: activeTab.startTime.toISOString()
+      });
 
     } catch (error) {
       Logger.error('Error opening tracked tab', error, 'TAB');
     }
   }
 
-  private async ensureScriptsInjected(tabId: number) {
+  private async injectScripts(tabId: number) {
     const activeTab = this.activeTabs.get(tabId);
-    if (!activeTab) return;
+    if (!activeTab || activeTab.status !== 'loading') return;
 
     try {
-      // Step 1: Inject settings
-      if (!activeTab.settingsInjected) {
-        await this.injectSettings(tabId);
-        activeTab.settingsInjected = true;
-      }
-
-      // Step 2: Wait a bit for isolated world content script to load (CRXJS handles this)
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // Step 3: Inject main world script (fallback in case isolated world injection fails)
-      if (!activeTab.mainWorldReady) {
-        await this.injectMainWorldScript(tabId);
-      }
-
-      Logger.info('Hybrid scripts injection completed', {
+      activeTab.status = 'injecting';
+      
+      // Step 1: Inject extension settings
+      await this.injectSettings(tabId, activeTab);
+      
+      // Step 2: Inject main world interceptor
+      await this.injectMainWorldScript(tabId);
+      
+      activeTab.status = 'ready';
+      
+      Logger.info('Scripts injected successfully', {
         tabId,
-        settingsInjected: activeTab.settingsInjected
+        linkName: activeTab.linkName
       }, `TAB_${tabId}`);
 
+      // Notify dashboard
+      this.notifyDashboard('TAB_UPDATED', {
+        tabId,
+        status: 'ready'
+      });
+
     } catch (error) {
-      Logger.error('Error in hybrid script injection', {
+      activeTab.status = 'error';
+      Logger.error('Script injection failed', {
         tabId,
         error: error instanceof Error ? error.message : String(error)
       }, `TAB_${tabId}`);
+
+      // Notify dashboard
+      this.notifyDashboard('TAB_UPDATED', {
+        tabId,
+        status: 'error'
+      });
     }
   }
 
-  private async injectSettings(tabId: number) {
-    const activeTab = this.activeTabs.get(tabId);
-    if (!activeTab) return;
+  // background.ts - inject settings 2 times
+  private async injectSettings(tabId: number, activeTab: ActiveTab) {
+    const settingsData = {
+      TRACKING_STOCK_LINK,
+      scheduleId: activeTab.scheduleId,
+      tabId,
+      DEBUG: true,
+      injectedAt: Date.now()
+    };
 
+    const injectFunc = (data: any) => {
+      (window as any).EXTENSION_SETTINGS = data;
+      console.log('Extension settings injected:', data);
+    };
+
+    // Inject into ISOLATED world (for request-tracker)
     await chrome.scripting.executeScript({
       target: { tabId },
-      func: (trackingStockLink: string, scheduleId: string, tabId: number) => {
-        (window as any).EXTENSION_SETTINGS = {
-          TRACKING_STOCK_LINK: trackingStockLink,
-          scheduleId: scheduleId,
-          tabId: tabId,
-          DEBUG: true,
-          injectedAt: Date.now()
-        };
-        console.log('Hybrid: Extension settings injected', (window as any).EXTENSION_SETTINGS);
-      },
-      args: [TRACKING_STOCK_LINK, activeTab.scheduleId, tabId]
+      world: 'ISOLATED',
+      func: injectFunc,
+      args: [settingsData]
     });
 
-    Logger.info('Settings injected', { tabId }, `TAB_${tabId}`);
+    // Inject into MAIN world (for main-world-interceptor)  
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: injectFunc,
+      args: [settingsData]
+    });
   }
 
-  private async injectMainWorldScript(tabId: number): Promise<boolean> {
+  private async injectMainWorldScript(tabId: number) {
     try {
-      // Read the main world script file
-      const scriptUrl = chrome.runtime.getURL('src/content/main-world-interceptor.ts');
-      const response = await fetch(scriptUrl);
-      const scriptContent = await response.text();
-
+      // Get the main world script URL
+      //const scriptUrl = chrome.runtime.getURL('content-scripts/main-world-interceptor.js');
+      
+      // Inject into main world
       await chrome.scripting.executeScript({
         target: { tabId },
-        world: 'MAIN',
-        code: scriptContent
-      } as any); // Type assertion to bypass Chrome API type issues
+        files: ['content-scripts/main-world-interceptor.js'],
+        world: 'MAIN'
+      });
 
-      const activeTab = this.activeTabs.get(tabId);
-      if (activeTab) {
-        activeTab.mainWorldReady = true;
-      }
-
-      Logger.info('Main world script injected by background', { tabId }, `TAB_${tabId}`);
-      return true;
-
+      Logger.info('Main world script injected', { tabId }, `TAB_${tabId}`);
     } catch (error) {
-      Logger.error('Background main world injection failed', {
+      Logger.error('Main world script injection failed', {
         tabId,
         error: error instanceof Error ? error.message : String(error)
       }, `TAB_${tabId}`);
-      return false;
+      throw error;
     }
   }
 
@@ -334,20 +363,29 @@ class HybridBackgroundManager {
     if (!tabId) return;
 
     const activeTab = this.activeTabs.get(tabId);
-    if (activeTab) {
-      activeTab.lastHeartbeat = new Date();
-      activeTab.trackedCount = data.totalTracked || 0;
-      activeTab.isolatedWorldReady = true;
-      activeTab.mainWorldReady = data.isMainWorldActive || false;
-      
-      Logger.info('Hybrid heartbeat received', {
-        tabId,
-        totalTracked: data.totalTracked,
-        completedRequests: data.completedRequests,
-        modelsFound: data.modelsFound,
-        mainWorldActive: data.isMainWorldActive
-      }, `TAB_${tabId}`);
+    if (!activeTab) return;
+
+    // Update tab status
+    activeTab.lastHeartbeat = new Date();
+    activeTab.trackedCount = data.totalTracked || 0;
+
+    if (activeTab.trackedCount > 0 && activeTab.status === 'ready') {
+      activeTab.status = 'tracking';
     }
+
+    Logger.info('Heartbeat received', {
+      tabId,
+      totalTracked: data.totalTracked,
+      completedRequests: data.completedRequests,
+      modelsFound: data.modelsFound
+    }, `TAB_${tabId}`);
+
+    // Notify dashboard
+    this.notifyDashboard('TAB_UPDATED', {
+      tabId,
+      status: activeTab.status,
+      requestCount: activeTab.trackedCount
+    });
   }
 
   private async closeTab(tabId: number) {
@@ -355,42 +393,52 @@ class HybridBackgroundManager {
     if (!activeTab) return;
 
     try {
+      // Clear close timer
+      if (activeTab.closeTimer) {
+        clearTimeout(activeTab.closeTimer);
+      }
+
+      // Get tracked data
       const trackedData = await this.getTrackedDataForSchedule(activeTab.scheduleId);
       const duration = Date.now() - activeTab.startTime.getTime();
       
+      // Update execution history
       await HistoryRepository.updateExecution(activeTab.historyId, {
         endTime: new Date(),
         success: trackedData.length > 0,
         logs: [
-          `Hybrid tab closed after ${Math.round(duration / 1000)}s`,
+          `Tab closed after ${Math.round(duration / 1000)}s`,
           `Total requests tracked: ${trackedData.length}`,
-          `Models found: ${trackedData.filter(r => r.modelsData).length}`,
-          `Settings injected: ${activeTab.settingsInjected}`,
-          `Isolated world ready: ${activeTab.isolatedWorldReady}`,
-          `Main world ready: ${activeTab.mainWorldReady}`
+          `Models found: ${trackedData.filter((r: any) => r.modelsData).length}`
         ],
         executionData: {
           trackedRequests: trackedData,
           duration: Math.round(duration / 1000),
-          captureMethod: 'hybrid-main-isolated-world',
-          scriptStatus: {
-            settingsInjected: activeTab.settingsInjected,
-            isolatedWorldReady: activeTab.isolatedWorldReady,
-            mainWorldReady: activeTab.mainWorldReady
-          }
+          captureMethod: 'hybrid-content-script'
         }
       });
 
+      // Close tab
       await chrome.tabs.remove(tabId);
       
-      Logger.info('Hybrid tab closed successfully', {
+      // Update status
+      activeTab.status = 'completed';
+      
+      Logger.info('Tab closed successfully', {
         tabId,
         duration: Math.round(duration / 1000) + 's',
         trackedRequestsCount: trackedData.length
       }, `TAB_${tabId}`);
 
+      // Notify dashboard
+      this.notifyDashboard('TAB_CLOSED', {
+        tabId,
+        duration: Math.round(duration / 1000),
+        trackedCount: trackedData.length
+      });
+
     } catch (error) {
-      Logger.warning('Error closing hybrid tab', {
+      Logger.error('Error closing tab', {
         tabId,
         error: error instanceof Error ? error.message : String(error)
       }, `TAB_${tabId}`);
@@ -403,23 +451,47 @@ class HybridBackgroundManager {
     const activeTab = this.activeTabs.get(tabId);
     if (!activeTab) return;
 
-    Logger.info('Hybrid tab removed externally', { tabId }, `TAB_${tabId}`);
+    Logger.info('Tab removed externally', { tabId }, `TAB_${tabId}`);
     
+    // Clear timer
+    if (activeTab.closeTimer) {
+      clearTimeout(activeTab.closeTimer);
+    }
+    
+    // Update history
     const duration = Date.now() - activeTab.startTime.getTime();
     HistoryRepository.updateExecution(activeTab.historyId, {
       endTime: new Date(),
       success: activeTab.trackedCount > 0,
-      logs: [`Hybrid tab closed externally after ${Math.round(duration / 1000)}s`],
-      executionData: {
-        duration: Math.round(duration / 1000),
-        trackedCount: activeTab.trackedCount,
-        captureMethod: 'hybrid-external-close'
-      }
+      logs: [`Tab closed externally after ${Math.round(duration / 1000)}s`]
     }).catch(error => {
-      Logger.error('Error updating history for closed tab', error, `TAB_${tabId}`);
+      Logger.error('Error updating history for removed tab', error, `TAB_${tabId}`);
     });
 
+    // Remove from active tabs
     this.activeTabs.delete(tabId);
+
+    // Notify dashboard
+    this.notifyDashboard('TAB_CLOSED', { tabId });
+  }
+
+  private async updateScheduleNextRun(schedule: Schedule) {
+    try {
+      if (schedule.type === 'once') {
+        // Disable one-time schedules after execution
+        await ScheduleRepository.update(schedule.id, { enabled: false });
+        Logger.info(`One-time schedule disabled: ${schedule.name}`, {}, 'SCHEDULER');
+      } else {
+        // Calculate next run for recurring schedules
+        const nextRun = SchedulerEngine.calculateNextRun(schedule);
+        await ScheduleRepository.updateNextRun(schedule.id, nextRun);
+        Logger.info(`Next run updated for ${schedule.name}`, { 
+          nextRun: nextRun.toISOString() 
+        }, 'SCHEDULER');
+      }
+    } catch (error) {
+      Logger.error('Error updating schedule next run', error, 'SCHEDULER');
+    }
   }
 
   private async closeAllActiveTabs() {
@@ -446,22 +518,21 @@ class HybridBackgroundManager {
     }
   }
 
-  private getTabStatus(tab: ActiveTab): string {
-    const now = new Date();
-    const timeSinceStart = now.getTime() - tab.startTime.getTime();
-    const timeSinceHeartbeat = tab.lastHeartbeat ? now.getTime() - tab.lastHeartbeat.getTime() : timeSinceStart;
-
-    if (timeSinceHeartbeat > 60000) {
-      return 'inactive';
-    } else if (tab.trackedCount > 0) {
-      return 'tracking';
-    } else if (tab.mainWorldReady && tab.isolatedWorldReady) {
-      return 'ready';
-    } else if (tab.settingsInjected) {
-      return 'injecting';
-    } else {
-      return 'loading';
+  private notifyDashboard(type: string, data: any) {
+    try {
+      chrome.runtime.sendMessage({
+        type,
+        data
+      }).catch(() => {
+        // Dashboard may not be open, ignore error
+      });
+    } catch (error) {
+      // Ignore messaging errors when dashboard is not available
     }
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   // Public API for debugging
@@ -472,21 +543,19 @@ class HybridBackgroundManager {
       activeTabs: Array.from(this.activeTabs.values()).map(tab => ({
         tabId: tab.tabId,
         linkName: tab.linkName,
-        status: this.getTabStatus(tab),
+        status: tab.status,
         trackedCount: tab.trackedCount,
-        settingsInjected: tab.settingsInjected,
-        isolatedWorldReady: tab.isolatedWorldReady,
-        mainWorldReady: tab.mainWorldReady
+        runtime: Date.now() - tab.startTime.getTime()
       }))
     };
   }
 }
 
-// Initialize hybrid background manager
-const hybridBackgroundManager = new HybridBackgroundManager();
+// Initialize background manager
+const backgroundManager = new BackgroundManager();
 
 // Export for debugging
-(globalThis as any).__hybridBackgroundManager__ = hybridBackgroundManager;
+(globalThis as any).__backgroundManager__ = backgroundManager;
 
-console.log('Hybrid Background Manager initialized');
-console.log('Debug: globalThis.__hybridBackgroundManager__.getStats()');
+console.log('Background Manager initialized');
+console.log('Debug: globalThis.__backgroundManager__.getStats()');
